@@ -4,9 +4,9 @@
 
 **Goal:** Build a Telegram bot that walks a single café's cashier through opening/closing a shift with an editable checklist, cash-discrepancy and lateness checks, a control X-report reminder, a Quick-Resto-sourced instructions library, and a self-service `/admin` menu for the client to edit everything without a developer.
 
-**Architecture:** Supabase Postgres holds all state; a single Telegram webhook Edge Function (Deno) handles every user interaction through a small message/callback router; a second `cron-tick` Edge Function, invoked every 5 minutes by `pg_cron`, sends the time-based reminders (opening/closing/X-report/lateness). All business logic is written against one `Store` interface so it can be unit-tested with an in-memory fake instead of a live database.
+**Architecture:** Cloudflare D1 (SQLite) holds all state; one Worker (`src/worker.ts`) exports both a `fetch` handler for the Telegram webhook — routed through a small message/callback router — and a `scheduled` handler, invoked every 5 minutes by a Cloudflare Cron Trigger, that sends the time-based reminders (opening/closing/X-report/lateness). All business logic is written against one `Store` interface so it can be unit-tested with an in-memory fake instead of a live database — this is also what let the project move off Supabase (whose free-tier project quota the client had already exhausted) onto Cloudflare mid-plan by rewriting only the storage layer and the two entry points, not the business logic.
 
-**Tech Stack:** Supabase (Postgres, Edge Functions on Deno, Storage, `pg_cron`), Telegram Bot API (raw `fetch`, no bot framework), Deno's built-in test runner.
+**Tech Stack:** Cloudflare Workers, D1 (SQLite), Cron Triggers; Telegram Bot API (raw `fetch`, no bot framework); Deno as the local dev/test runner for all platform-independent logic, `wrangler` for everything Cloudflare-specific.
 
 **Spec:** `docs/superpowers/specs/2026-09-25-smena-bot-design.md`
 
@@ -32,96 +32,115 @@
 ### Task 1: Database schema & seed data
 
 **Files:**
-- Create: `supabase/migrations/0001_init.sql`
+- Create: `wrangler.toml`
+- Create: `migrations/0001_init.sql`
 
 **Interfaces:**
 - Consumes: nothing (first task).
-- Produces: the Postgres schema every later task's `Store` implementation reads and writes — table/column names below are load-bearing for Task 3.
+- Produces: the D1 (SQLite) schema every later task's `Store` implementation reads and writes — table/column names below are load-bearing for Task 3. IDs are `text` (no server-side UUID generation in SQLite) — the application layer generates them with `crypto.randomUUID()`, exactly like `createInMemoryStore` already does.
 
-- [ ] **Step 1: Write the migration**
+- [ ] **Step 1: Create the D1 database and a minimal `wrangler.toml`**
+
+Run: `npx wrangler d1 create smena-bot-db`
+Expected: prints a `database_id` — copy it into the file below.
+
+```toml
+# wrangler.toml
+name = "smena-bot"
+compatibility_date = "2026-09-25"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "smena-bot-db"
+database_id = "PASTE_THE_ID_FROM_THE_PREVIOUS_COMMAND_HERE"
+```
+
+(`main` is added in Task 4 once there is a Worker entry point to point it at.)
+
+- [ ] **Step 2: Write the migration**
+
+SQLite has no `uuid`/`timestamptz`/`jsonb`/`boolean` types — ids are `text` (app-generated), timestamps and dates are ISO-8601 `text` (matching the `.toISOString()` strings the app already produces), amounts are `real`, booleans are `integer` 0/1 (SQLite's dynamic typing accepts writes/reads of JS `true`/`false` via the D1 driver, but the `Store` implementation in Task 3 converts explicitly to be safe).
 
 ```sql
--- supabase/migrations/0001_init.sql
-create extension if not exists pgcrypto;
-
+-- migrations/0001_init.sql
 create table employees (
-  id uuid primary key default gen_random_uuid(),
-  telegram_id bigint unique not null,
+  id text primary key,
+  telegram_id integer unique not null,
   full_name text not null,
-  active boolean not null default true,
-  created_at timestamptz not null default now()
+  active integer not null default 1,
+  created_at text not null default (datetime('now'))
 );
 
 create table admins (
-  id uuid primary key default gen_random_uuid(),
-  telegram_id bigint unique not null,
+  id text primary key,
+  telegram_id integer unique not null,
   full_name text not null,
-  created_at timestamptz not null default now()
+  created_at text not null default (datetime('now'))
 );
 
 create table schedule (
-  weekday smallint primary key check (weekday between 0 and 6), -- 0 = Monday .. 6 = Sunday
-  opens_at time not null,
-  closes_at time not null
+  weekday integer primary key check (weekday between 0 and 6), -- 0 = Monday .. 6 = Sunday
+  opens_at text not null,
+  closes_at text not null
 );
 
 create table checklist_items (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   phase text not null check (phase in ('open','close')),
-  position int not null,
+  position integer not null,
   label text not null,
-  requires_photo boolean not null default false
+  requires_photo integer not null default 0
 );
 
 create table instructions (
-  id uuid primary key default gen_random_uuid(),
-  position int not null,
+  id text primary key,
+  position integer not null,
   title text not null,
   body text not null,
   media_url text
 );
 
 create table expiry_items (
-  id uuid primary key default gen_random_uuid(),
-  position int not null,
+  id text primary key,
+  position integer not null,
   name text not null,
-  shelf_life_days int not null
+  shelf_life_days integer not null
 );
 
 create table shifts (
-  id uuid primary key default gen_random_uuid(),
-  employee_id uuid not null references employees(id),
-  shift_date date not null,
-  opened_at timestamptz,
-  closed_at timestamptz,
-  open_cash_amount numeric(10,2),
-  closing_float_amount numeric(10,2),
-  cash_discrepancy numeric(10,2),
-  xreport_cash numeric(10,2),
-  xreport_cashless numeric(10,2),
-  xreport_at timestamptz,
+  id text primary key,
+  employee_id text not null references employees(id),
+  shift_date text not null,
+  opened_at text,
+  closed_at text,
+  open_cash_amount real,
+  closing_float_amount real,
+  cash_discrepancy real,
+  xreport_cash real,
+  xreport_cashless real,
+  xreport_at text,
   status text not null default 'pending' check (status in ('pending','open','closed')),
-  reminded_open_at timestamptz,
-  notified_late_at timestamptz,
-  reminded_close_at timestamptz,
-  reminded_xreport_at timestamptz,
+  reminded_open_at text,
+  notified_late_at text,
+  reminded_close_at text,
+  reminded_xreport_at text,
   unique (employee_id, shift_date)
 );
 
 create table shift_checklist_progress (
-  id uuid primary key default gen_random_uuid(),
-  shift_id uuid not null references shifts(id) on delete cascade,
-  checklist_item_id uuid not null references checklist_items(id) on delete cascade,
-  done boolean not null default false,
+  id text primary key,
+  shift_id text not null references shifts(id) on delete cascade,
+  checklist_item_id text not null references checklist_items(id) on delete cascade,
+  done integer not null default 0,
   photo_file_id text,
   unique (shift_id, checklist_item_id)
 );
 
 create table bot_sessions (
-  telegram_id bigint primary key,
+  telegram_id integer primary key,
   state text,
-  data jsonb not null default '{}'::jsonb,
-  updated_at timestamptz not null default now()
+  data text not null default '{}',
+  updated_at text not null default (datetime('now'))
 );
 
 -- seed: schedule (Mon-Fri 08:30-19:30, Sat 09:00-19:00, Sun 09:00-18:00)
@@ -132,37 +151,37 @@ insert into schedule (weekday, opens_at, closes_at) values
   (6,'09:00','18:00');
 
 -- seed: default checklists
-insert into checklist_items (phase, position, label, requires_photo) values
-  ('open', 1, 'Кофемашина прогрета', false),
-  ('open', 2, 'Терминал включён', false),
-  ('open', 3, 'Зал чистый', false),
-  ('close', 1, 'Фото отчёта с кассы', true);
+insert into checklist_items (id, phase, position, label, requires_photo) values
+  ('seed-open-1', 'open', 1, 'Кофемашина прогрета', 0),
+  ('seed-open-2', 'open', 2, 'Терминал включён', 0),
+  ('seed-open-3', 'open', 3, 'Зал чистый', 0),
+  ('seed-close-1', 'close', 1, 'Фото отчёта с кассы', 1);
 
 -- seed: expiry list from the client's dessert shelf-life sheet
-insert into expiry_items (position, name, shelf_life_days) values
-  (1,'Канеле',2), (2,'Пирог миндаль',5), (3,'Чизкейк',3),
-  (4,'Пирог смородина',5), (5,'Пирог вишня',5), (6,'Тарт лимонный',3),
-  (7,'Кексы',5), (8,'Наполеон',5), (9,'Медовик',5), (10,'Картошка',5);
+insert into expiry_items (id, position, name, shelf_life_days) values
+  ('seed-exp-1',1,'Канеле',2), ('seed-exp-2',2,'Пирог миндаль',5), ('seed-exp-3',3,'Чизкейк',3),
+  ('seed-exp-4',4,'Пирог смородина',5), ('seed-exp-5',5,'Пирог вишня',5), ('seed-exp-6',6,'Тарт лимонный',3),
+  ('seed-exp-7',7,'Кексы',5), ('seed-exp-8',8,'Наполеон',5), ('seed-exp-9',9,'Медовик',5), ('seed-exp-10',10,'Картошка',5);
 ```
 
-- [ ] **Step 2: Apply the migration to the local Supabase stack**
+- [ ] **Step 3: Apply the migration to the local D1 emulator**
 
-Run: `supabase start` (first time only), then `supabase db reset`
-Expected: output ends with `Finished supabase db reset` and no SQL errors.
+Run: `npx wrangler d1 execute smena-bot-db --local --file=migrations/0001_init.sql`
+Expected: output ends with `Executed N queries` and no SQL errors.
 
-- [ ] **Step 3: Verify the seed data landed**
+- [ ] **Step 4: Verify the seed data landed**
 
 Run:
 ```bash
-supabase db execute --sql "select (select count(*) from schedule) as schedule_rows, (select count(*) from checklist_items) as checklist_rows, (select count(*) from expiry_items) as expiry_rows;"
+npx wrangler d1 execute smena-bot-db --local --command "select (select count(*) from schedule) as schedule_rows, (select count(*) from checklist_items) as checklist_rows, (select count(*) from expiry_items) as expiry_rows;"
 ```
 Expected: `schedule_rows = 7`, `checklist_rows = 4`, `expiry_rows = 10`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add supabase/migrations/0001_init.sql
-git commit -m "Add initial database schema and seed data"
+git add wrangler.toml migrations/0001_init.sql
+git commit -m "Add initial D1 database schema and seed data"
 ```
 
 ---
@@ -170,8 +189,8 @@ git commit -m "Add initial database schema and seed data"
 ### Task 2: Telegram API client
 
 **Files:**
-- Create: `supabase/functions/_shared/telegram.ts`
-- Test: `supabase/functions/_shared/telegram_test.ts`
+- Create: `src/_shared/telegram.ts`
+- Test: `src/_shared/telegram_test.ts`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -180,7 +199,7 @@ git commit -m "Add initial database schema and seed data"
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// supabase/functions/_shared/telegram_test.ts
+// src/_shared/telegram_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createTelegramClient } from "./telegram.ts";
 
@@ -259,13 +278,13 @@ Deno.test("editMessageReplyMarkup posts chat id, message id, and the new markup"
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `deno test supabase/functions/_shared/telegram_test.ts`
+Run: `deno test src/_shared/telegram_test.ts`
 Expected: FAIL — `telegram.ts` does not exist yet.
 
 - [ ] **Step 3: Implement the client**
 
 ```ts
-// supabase/functions/_shared/telegram.ts
+// src/_shared/telegram.ts
 const TELEGRAM_API = "https://api.telegram.org";
 
 export interface TelegramUpdate {
@@ -358,35 +377,35 @@ export function createTelegramClient(
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `deno test supabase/functions/_shared/telegram_test.ts`
+Run: `deno test src/_shared/telegram_test.ts`
 Expected: PASS (5 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add supabase/functions/_shared/telegram.ts supabase/functions/_shared/telegram_test.ts
+git add src/_shared/telegram.ts src/_shared/telegram_test.ts
 git commit -m "Add Telegram API client"
 ```
 
 ---
 
-### Task 3: Persistence layer (`Store` interface, in-memory fake, Supabase implementation)
+### Task 3: Persistence layer (`Store` interface, in-memory fake, D1 implementation)
 
-Every later task reads and writes data only through the `Store` interface defined here — never directly through `supabase-js` or raw SQL. This is what lets every handler task be unit-tested with `createInMemoryStore()` instead of a live database.
+Every later task reads and writes data only through the `Store` interface defined here — never directly through the D1 binding or raw SQL. This is what lets every handler task be unit-tested with `createInMemoryStore()` instead of a live database, and what made it possible to swap Supabase for Cloudflare mid-project without touching Tasks 4–13's business logic.
 
 **Files:**
-- Create: `supabase/functions/_shared/store.ts` (types + `createInMemoryStore`)
-- Create: `supabase/functions/_shared/supabaseStore.ts` (`createSupabaseStore`)
-- Test: `supabase/functions/_shared/store_test.ts`
+- Create: `src/_shared/store.ts` (types + `createInMemoryStore`)
+- Create: `src/_shared/d1Store.ts` (`createD1Store`)
+- Test: `src/_shared/store_test.ts`
 
 **Interfaces:**
-- Consumes: table/column names from Task 1's migration (`supabaseStore.ts` only).
+- Consumes: table/column names from Task 1's migration (`d1Store.ts` only).
 - Produces: the `Store` interface and every domain type (`Employee`, `Admin`, `ScheduleDay`, `ChecklistItem`, `InstructionArticle`, `ExpiryItem`, `Shift`, `ChecklistProgress`, `SessionState`) that Tasks 4–13 import from `_shared/store.ts`.
 
 - [ ] **Step 1: Write the failing tests against the in-memory store**
 
 ```ts
-// supabase/functions/_shared/store_test.ts
+// src/_shared/store_test.ts
 import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "./store.ts";
 
@@ -477,13 +496,13 @@ Deno.test("session get/set/clear round-trips per telegram id", async () => {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `deno test supabase/functions/_shared/store_test.ts`
+Run: `deno test src/_shared/store_test.ts`
 Expected: FAIL — `store.ts` does not exist yet.
 
 - [ ] **Step 3: Implement the `Store` interface and the in-memory fake**
 
 ```ts
-// supabase/functions/_shared/store.ts
+// src/_shared/store.ts
 
 export interface Employee {
   id: string;
@@ -792,23 +811,26 @@ export function createInMemoryStore(): Store {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `deno test supabase/functions/_shared/store_test.ts`
+Run: `deno test src/_shared/store_test.ts`
 Expected: PASS (8 tests).
 
-- [ ] **Step 5: Implement the Supabase-backed store**
+- [ ] **Step 5: Implement the D1-backed store**
 
-This implementation is not exercised by the automated test suite (no live database in CI for this plan) — it is smoke-tested manually against `supabase start` in Task 14. It must satisfy the exact same `Store` interface.
+This implementation is not exercised by the automated test suite (no live database in CI for this plan) — it is smoke-tested manually with `wrangler d1 execute --local` queries in Task 14. It must satisfy the exact same `Store` interface. `D1Database` (and the `.prepare()/.bind()/.run()/.all()/.first()` methods used below) is an ambient global type from `@cloudflare/workers-types`, installed and wired into `tsconfig.json` in Task 14 — no import needed once that's in place.
 
 ```ts
-// supabase/functions/_shared/supabaseStore.ts
-import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+// src/_shared/d1Store.ts
 import type {
   Admin, ChecklistItem, ChecklistPhase, ChecklistProgress, Employee,
-  ExpiryItem, InstructionArticle, ScheduleDay, SessionState, Shift, Store,
+  ExpiryItem, InstructionArticle, ScheduleDay, Shift, Store,
 } from "./store.ts";
 
+function makeId(): string {
+  return crypto.randomUUID();
+}
+
 function toEmployee(row: Record<string, unknown>): Employee {
-  return { id: row.id as string, telegramId: Number(row.telegram_id), fullName: row.full_name as string, active: row.active as boolean };
+  return { id: row.id as string, telegramId: Number(row.telegram_id), fullName: row.full_name as string, active: Boolean(row.active) };
 }
 function toAdmin(row: Record<string, unknown>): Admin {
   return { id: row.id as string, telegramId: Number(row.telegram_id), fullName: row.full_name as string };
@@ -816,7 +838,7 @@ function toAdmin(row: Record<string, unknown>): Admin {
 function toChecklistItem(row: Record<string, unknown>): ChecklistItem {
   return {
     id: row.id as string, phase: row.phase as ChecklistPhase, position: row.position as number,
-    label: row.label as string, requiresPhoto: row.requires_photo as boolean,
+    label: row.label as string, requiresPhoto: Boolean(row.requires_photo),
   };
 }
 function toInstruction(row: Record<string, unknown>): InstructionArticle {
@@ -842,188 +864,180 @@ function toShift(row: Record<string, unknown>): Shift {
     remindedXreportAt: (row.reminded_xreport_at as string) ?? null,
   };
 }
-function shiftPatchToRow(patch: Partial<Shift>): Record<string, unknown> {
-  const map: Record<string, string> = {
-    openedAt: "opened_at", closedAt: "closed_at", openCashAmount: "open_cash_amount",
-    closingFloatAmount: "closing_float_amount", cashDiscrepancy: "cash_discrepancy",
-    xreportCash: "xreport_cash", xreportCashless: "xreport_cashless", xreportAt: "xreport_at",
-    status: "status", remindedOpenAt: "reminded_open_at", notifiedLateAt: "notified_late_at",
-    remindedCloseAt: "reminded_close_at", remindedXreportAt: "reminded_xreport_at",
-  };
-  const row: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(patch)) {
-    if (key in map) row[map[key]] = value;
-  }
-  return row;
-}
 
-export function createSupabaseStore(url: string, serviceRoleKey: string): Store {
-  const db: SupabaseClient = createClient(url, serviceRoleKey);
+const SHIFT_PATCH_COLUMNS: Record<string, string> = {
+  openedAt: "opened_at", closedAt: "closed_at", openCashAmount: "open_cash_amount",
+  closingFloatAmount: "closing_float_amount", cashDiscrepancy: "cash_discrepancy",
+  xreportCash: "xreport_cash", xreportCashless: "xreport_cashless", xreportAt: "xreport_at",
+  status: "status", remindedOpenAt: "reminded_open_at", notifiedLateAt: "notified_late_at",
+  remindedCloseAt: "reminded_close_at", remindedXreportAt: "reminded_xreport_at",
+};
+
+export function createD1Store(db: D1Database): Store {
+  async function first(sql: string, ...params: unknown[]): Promise<Record<string, unknown> | null> {
+    return (await db.prepare(sql).bind(...params).first()) as Record<string, unknown> | null;
+  }
+  async function all(sql: string, ...params: unknown[]): Promise<Record<string, unknown>[]> {
+    const { results } = await db.prepare(sql).bind(...params).all();
+    return results as Record<string, unknown>[];
+  }
+  async function run(sql: string, ...params: unknown[]): Promise<void> {
+    await db.prepare(sql).bind(...params).run();
+  }
 
   return {
     async getEmployeeByTelegramId(telegramId) {
-      const { data, error } = await db.from("employees").select("*").eq("telegram_id", telegramId).maybeSingle();
-      if (error) throw error;
-      return data ? toEmployee(data) : null;
+      const row = await first("select * from employees where telegram_id = ?", telegramId);
+      return row ? toEmployee(row) : null;
     },
     async listEmployees() {
-      const { data, error } = await db.from("employees").select("*");
-      if (error) throw error;
-      return (data ?? []).map(toEmployee);
+      return (await all("select * from employees")).map(toEmployee);
     },
     async addEmployee(telegramId, fullName) {
-      const { data, error } = await db.from("employees").insert({ telegram_id: telegramId, full_name: fullName }).select().single();
-      if (error) throw error;
-      return toEmployee(data);
+      const id = makeId();
+      await run("insert into employees (id, telegram_id, full_name) values (?, ?, ?)", id, telegramId, fullName);
+      return { id, telegramId, fullName, active: true };
     },
     async removeEmployee(id) {
-      const { error } = await db.from("employees").delete().eq("id", id);
-      if (error) throw error;
+      await run("delete from employees where id = ?", id);
     },
 
     async getAdminByTelegramId(telegramId) {
-      const { data, error } = await db.from("admins").select("*").eq("telegram_id", telegramId).maybeSingle();
-      if (error) throw error;
-      return data ? toAdmin(data) : null;
+      const row = await first("select * from admins where telegram_id = ?", telegramId);
+      return row ? toAdmin(row) : null;
     },
     async listAdmins() {
-      const { data, error } = await db.from("admins").select("*");
-      if (error) throw error;
-      return (data ?? []).map(toAdmin);
+      return (await all("select * from admins")).map(toAdmin);
     },
     async addAdmin(telegramId, fullName) {
-      const { data, error } = await db.from("admins").insert({ telegram_id: telegramId, full_name: fullName }).select().single();
-      if (error) throw error;
-      return toAdmin(data);
+      const id = makeId();
+      await run("insert into admins (id, telegram_id, full_name) values (?, ?, ?)", id, telegramId, fullName);
+      return { id, telegramId, fullName };
     },
     async removeAdmin(id) {
-      const { count, error: countError } = await db.from("admins").select("id", { count: "exact", head: true });
-      if (countError) throw countError;
-      if ((count ?? 0) <= 1) throw new Error("Cannot remove the last remaining admin");
-      const { error } = await db.from("admins").delete().eq("id", id);
-      if (error) throw error;
+      const countRow = await first("select count(*) as n from admins");
+      if (Number(countRow?.n ?? 0) <= 1) throw new Error("Cannot remove the last remaining admin");
+      await run("delete from admins where id = ?", id);
     },
 
     async getSchedule() {
-      const { data, error } = await db.from("schedule").select("*").order("weekday");
-      if (error) throw error;
-      return (data ?? []).map((r): ScheduleDay => ({ weekday: r.weekday, opensAt: r.opens_at, closesAt: r.closes_at }));
+      const rows = await all("select * from schedule order by weekday");
+      return rows.map((r): ScheduleDay => ({ weekday: r.weekday as number, opensAt: r.opens_at as string, closesAt: r.closes_at as string }));
     },
 
     async listChecklistItems(phase) {
-      const { data, error } = await db.from("checklist_items").select("*").eq("phase", phase).order("position");
-      if (error) throw error;
-      return (data ?? []).map(toChecklistItem);
+      return (await all("select * from checklist_items where phase = ? order by position", phase)).map(toChecklistItem);
     },
     async addChecklistItem(phase, label, requiresPhoto) {
       const existing = await this.listChecklistItems(phase);
-      const { data, error } = await db
-        .from("checklist_items")
-        .insert({ phase, label, requires_photo: requiresPhoto, position: existing.length + 1 })
-        .select().single();
-      if (error) throw error;
-      return toChecklistItem(data);
+      const id = makeId();
+      const position = existing.length + 1;
+      await run(
+        "insert into checklist_items (id, phase, position, label, requires_photo) values (?, ?, ?, ?, ?)",
+        id, phase, position, label, requiresPhoto ? 1 : 0,
+      );
+      return { id, phase, position, label, requiresPhoto };
     },
     async removeChecklistItem(id) {
-      const { error } = await db.from("checklist_items").delete().eq("id", id);
-      if (error) throw error;
+      await run("delete from checklist_items where id = ?", id);
     },
 
     async listInstructions() {
-      const { data, error } = await db.from("instructions").select("*").order("position");
-      if (error) throw error;
-      return (data ?? []).map(toInstruction);
+      return (await all("select * from instructions order by position")).map(toInstruction);
     },
     async addInstruction(title, body, mediaUrl) {
       const existing = await this.listInstructions();
-      const { data, error } = await db
-        .from("instructions")
-        .insert({ title, body, media_url: mediaUrl, position: existing.length + 1 })
-        .select().single();
-      if (error) throw error;
-      return toInstruction(data);
+      const id = makeId();
+      const position = existing.length + 1;
+      await run(
+        "insert into instructions (id, position, title, body, media_url) values (?, ?, ?, ?, ?)",
+        id, position, title, body, mediaUrl,
+      );
+      return { id, position, title, body, mediaUrl };
     },
     async removeInstruction(id) {
-      const { error } = await db.from("instructions").delete().eq("id", id);
-      if (error) throw error;
+      await run("delete from instructions where id = ?", id);
     },
 
     async listExpiryItems() {
-      const { data, error } = await db.from("expiry_items").select("*").order("position");
-      if (error) throw error;
-      return (data ?? []).map(toExpiryItem);
+      return (await all("select * from expiry_items order by position")).map(toExpiryItem);
     },
     async addExpiryItem(name, shelfLifeDays) {
       const existing = await this.listExpiryItems();
-      const { data, error } = await db
-        .from("expiry_items")
-        .insert({ name, shelf_life_days: shelfLifeDays, position: existing.length + 1 })
-        .select().single();
-      if (error) throw error;
-      return toExpiryItem(data);
+      const id = makeId();
+      const position = existing.length + 1;
+      await run(
+        "insert into expiry_items (id, position, name, shelf_life_days) values (?, ?, ?, ?)",
+        id, position, name, shelfLifeDays,
+      );
+      return { id, position, name, shelfLifeDays };
     },
     async removeExpiryItem(id) {
-      const { error } = await db.from("expiry_items").delete().eq("id", id);
-      if (error) throw error;
+      await run("delete from expiry_items where id = ?", id);
     },
 
     async getShift(employeeId, shiftDate) {
-      const { data, error } = await db.from("shifts").select("*").eq("employee_id", employeeId).eq("shift_date", shiftDate).maybeSingle();
-      if (error) throw error;
-      return data ? toShift(data) : null;
+      const row = await first("select * from shifts where employee_id = ? and shift_date = ?", employeeId, shiftDate);
+      return row ? toShift(row) : null;
     },
     async getShiftById(id) {
-      const { data, error } = await db.from("shifts").select("*").eq("id", id).maybeSingle();
-      if (error) throw error;
-      return data ? toShift(data) : null;
+      const row = await first("select * from shifts where id = ?", id);
+      return row ? toShift(row) : null;
     },
     async createShift(employeeId, shiftDate) {
-      const { data, error } = await db.from("shifts").insert({ employee_id: employeeId, shift_date: shiftDate }).select().single();
-      if (error) throw error;
-      return toShift(data);
+      const id = makeId();
+      await run("insert into shifts (id, employee_id, shift_date) values (?, ?, ?)", id, employeeId, shiftDate);
+      return (await this.getShiftById(id))!;
     },
     async updateShift(id, patch) {
-      const { data, error } = await db.from("shifts").update(shiftPatchToRow(patch)).eq("id", id).select().single();
-      if (error) throw error;
-      return toShift(data);
+      const entries = Object.entries(patch).filter(([key]) => key in SHIFT_PATCH_COLUMNS);
+      if (entries.length > 0) {
+        const setClause = entries.map(([key]) => `${SHIFT_PATCH_COLUMNS[key]} = ?`).join(", ");
+        const values = entries.map(([, value]) => value);
+        await run(`update shifts set ${setClause} where id = ?`, ...values, id);
+      }
+      return (await this.getShiftById(id))!;
     },
     async getPreviousShift(employeeId, beforeDate) {
-      const { data, error } = await db
-        .from("shifts").select("*").eq("employee_id", employeeId).lt("shift_date", beforeDate)
-        .order("shift_date", { ascending: false }).limit(1).maybeSingle();
-      if (error) throw error;
-      return data ? toShift(data) : null;
+      const row = await first(
+        "select * from shifts where employee_id = ? and shift_date < ? order by shift_date desc limit 1",
+        employeeId, beforeDate,
+      );
+      return row ? toShift(row) : null;
     },
     async listShiftsForDate(shiftDate) {
-      const { data, error } = await db.from("shifts").select("*").eq("shift_date", shiftDate);
-      if (error) throw error;
-      return (data ?? []).map(toShift);
+      return (await all("select * from shifts where shift_date = ?", shiftDate)).map(toShift);
     },
 
     async getChecklistProgress(shiftId) {
-      const { data, error } = await db.from("shift_checklist_progress").select("*").eq("shift_id", shiftId);
-      if (error) throw error;
-      return (data ?? []).map((r): ChecklistProgress => ({
-        shiftId: r.shift_id, checklistItemId: r.checklist_item_id, done: r.done, photoFileId: r.photo_file_id ?? null,
+      const rows = await all("select * from shift_checklist_progress where shift_id = ?", shiftId);
+      return rows.map((r): ChecklistProgress => ({
+        shiftId: r.shift_id as string, checklistItemId: r.checklist_item_id as string,
+        done: Boolean(r.done), photoFileId: (r.photo_file_id as string) ?? null,
       }));
     },
     async setChecklistProgress(shiftId, checklistItemId, done, photoFileId = null) {
-      const { error } = await db
-        .from("shift_checklist_progress")
-        .upsert({ shift_id: shiftId, checklist_item_id: checklistItemId, done, photo_file_id: photoFileId }, { onConflict: "shift_id,checklist_item_id" });
-      if (error) throw error;
+      await run(
+        `insert into shift_checklist_progress (id, shift_id, checklist_item_id, done, photo_file_id)
+         values (?, ?, ?, ?, ?)
+         on conflict (shift_id, checklist_item_id)
+         do update set done = excluded.done, photo_file_id = excluded.photo_file_id`,
+        makeId(), shiftId, checklistItemId, done ? 1 : 0, photoFileId,
+      );
     },
 
     async getSession(telegramId) {
-      const { data, error } = await db.from("bot_sessions").select("state, data").eq("telegram_id", telegramId).maybeSingle();
-      if (error) throw error;
-      return data ? { state: data.state, data: data.data } : { state: null, data: {} };
+      const row = await first("select state, data from bot_sessions where telegram_id = ?", telegramId);
+      return row ? { state: row.state as string | null, data: JSON.parse(row.data as string) } : { state: null, data: {} };
     },
     async setSession(telegramId, state, data = {}) {
-      const { error } = await db
-        .from("bot_sessions")
-        .upsert({ telegram_id: telegramId, state, data, updated_at: new Date().toISOString() });
-      if (error) throw error;
+      await run(
+        `insert into bot_sessions (telegram_id, state, data, updated_at)
+         values (?, ?, ?, datetime('now'))
+         on conflict (telegram_id)
+         do update set state = excluded.state, data = excluded.data, updated_at = excluded.updated_at`,
+        telegramId, state, JSON.stringify(data),
+      );
     },
     async clearSession(telegramId) {
       await this.setSession(telegramId, null, {});
@@ -1035,8 +1049,8 @@ export function createSupabaseStore(url: string, serviceRoleKey: string): Store 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add supabase/functions/_shared/store.ts supabase/functions/_shared/store_test.ts supabase/functions/_shared/supabaseStore.ts
-git commit -m "Add Store interface with in-memory and Supabase implementations"
+git add src/_shared/store.ts src/_shared/store_test.ts src/_shared/d1Store.ts
+git commit -m "Add Store interface with in-memory and D1 implementations"
 ```
 
 ---
@@ -1046,13 +1060,14 @@ git commit -m "Add Store interface with in-memory and Supabase implementations"
 Sets up the routing skeleton every later handler task plugs into, plus the secret-token check as its own pure, testable function.
 
 **Files:**
-- Create: `supabase/functions/_shared/auth.ts`
-- Create: `supabase/functions/telegram-webhook/router.ts` (`handleMessage`)
-- Create: `supabase/functions/telegram-webhook/callbackRouter.ts` (`handleCallbackQuery`)
-- Create: `supabase/functions/telegram-webhook/handleUpdate.ts`
-- Create: `supabase/functions/telegram-webhook/index.ts`
-- Test: `supabase/functions/_shared/auth_test.ts`
-- Test: `supabase/functions/telegram-webhook/handleUpdate_test.ts`
+- Create: `src/_shared/auth.ts`
+- Create: `src/telegram-webhook/router.ts` (`handleMessage`)
+- Create: `src/telegram-webhook/callbackRouter.ts` (`handleCallbackQuery`)
+- Create: `src/telegram-webhook/handleUpdate.ts`
+- Create: `src/worker.ts` (the Cloudflare Worker entry point — `main` in `wrangler.toml`)
+- Modify: `wrangler.toml` (add `main`)
+- Test: `src/_shared/auth_test.ts`
+- Test: `src/telegram-webhook/handleUpdate_test.ts`
 
 **Interfaces:**
 - Consumes: `Store`, `createInMemoryStore` from Task 3; `TelegramClient`, `TelegramUpdate`, `TelegramMessage`, `TelegramCallbackQuery` from Task 2.
@@ -1061,7 +1076,7 @@ Sets up the routing skeleton every later handler task plugs into, plus the secre
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// supabase/functions/_shared/auth_test.ts
+// src/_shared/auth_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { isAuthorized } from "./auth.ts";
 
@@ -1085,7 +1100,7 @@ Deno.test("isAuthorized allows any request when no secret is configured", () => 
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/handleUpdate_test.ts
+// src/telegram-webhook/handleUpdate_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../_shared/store.ts";
 import type { TelegramClient, TelegramUpdate } from "../_shared/telegram.ts";
@@ -1144,13 +1159,13 @@ Deno.test("an update with neither message nor callback_query is a no-op", async 
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `deno test supabase/functions/_shared/auth_test.ts supabase/functions/telegram-webhook/handleUpdate_test.ts`
+Run: `deno test src/_shared/auth_test.ts src/telegram-webhook/handleUpdate_test.ts`
 Expected: FAIL — the source files don't exist yet.
 
 - [ ] **Step 3: Implement `auth.ts`**
 
 ```ts
-// supabase/functions/_shared/auth.ts
+// src/_shared/auth.ts
 export function isAuthorized(req: Request, secret: string | undefined): boolean {
   if (!secret) return true;
   return req.headers.get("x-telegram-bot-api-secret-token") === secret;
@@ -1160,7 +1175,7 @@ export function isAuthorized(req: Request, secret: string | undefined): boolean 
 - [ ] **Step 4: Implement the router, callback router, and `handleUpdate`**
 
 ```ts
-// supabase/functions/telegram-webhook/router.ts
+// src/telegram-webhook/router.ts
 import type { Store } from "../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../_shared/telegram.ts";
 
@@ -1174,7 +1189,7 @@ export async function handleMessage(
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/callbackRouter.ts
+// src/telegram-webhook/callbackRouter.ts
 import type { Store } from "../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient } from "../_shared/telegram.ts";
 
@@ -1188,7 +1203,7 @@ export async function handleCallbackQuery(
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/handleUpdate.ts
+// src/telegram-webhook/handleUpdate.ts
 import type { Store } from "../_shared/store.ts";
 import type { TelegramClient, TelegramUpdate } from "../_shared/telegram.ts";
 import { handleMessage } from "./router.ts";
@@ -1208,41 +1223,57 @@ export async function handleUpdate(
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/index.ts
-import { createSupabaseStore } from "../_shared/supabaseStore.ts";
-import { createTelegramClient } from "../_shared/telegram.ts";
-import { isAuthorized } from "../_shared/auth.ts";
-import type { TelegramUpdate } from "../_shared/telegram.ts";
-import { handleUpdate } from "./handleUpdate.ts";
+// src/worker.ts
+//
+// This is the Worker's `fetch` export — the only thing wrangler.toml's `main`
+// points at. Task 9 adds a `scheduled` export to this same file for the cron
+// reminders, so one deployed Worker handles both the webhook and the cron tick.
+import { createD1Store } from "./_shared/d1Store.ts";
+import { createTelegramClient } from "./_shared/telegram.ts";
+import { isAuthorized } from "./_shared/auth.ts";
+import type { TelegramUpdate } from "./_shared/telegram.ts";
+import { handleUpdate } from "./telegram-webhook/handleUpdate.ts";
 
-Deno.serve(async (req) => {
-  const secret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
-  if (!isAuthorized(req, secret)) {
-    return new Response("forbidden", { status: 403 });
-  }
+export interface Env {
+  DB: D1Database;
+  TELEGRAM_BOT_TOKEN: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
+}
 
-  const update = (await req.json()) as TelegramUpdate;
-  const store = createSupabaseStore(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-  const telegram = createTelegramClient(Deno.env.get("TELEGRAM_BOT_TOKEN")!);
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (!isAuthorized(request, env.TELEGRAM_WEBHOOK_SECRET)) {
+      return new Response("forbidden", { status: 403 });
+    }
 
-  try {
-    await handleUpdate(store, telegram, update);
-  } catch (err) {
-    console.error("handleUpdate failed", err);
-  }
-  return new Response("ok", { status: 200 });
-});
+    const update = (await request.json()) as TelegramUpdate;
+    const store = createD1Store(env.DB);
+    const telegram = createTelegramClient(env.TELEGRAM_BOT_TOKEN);
+
+    try {
+      await handleUpdate(store, telegram, update);
+    } catch (err) {
+      console.error("handleUpdate failed", err);
+    }
+    return new Response("ok", { status: 200 });
+  },
+};
+```
+
+```toml
+# wrangler.toml — add this line (keep the existing [[d1_databases]] block from Task 1)
+main = "src/worker.ts"
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `deno test supabase/functions/_shared/auth_test.ts supabase/functions/telegram-webhook/handleUpdate_test.ts`
+Run: `deno test src/_shared/auth_test.ts src/telegram-webhook/handleUpdate_test.ts`
 Expected: PASS (6 tests).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add supabase/functions/_shared/auth.ts supabase/functions/_shared/auth_test.ts supabase/functions/telegram-webhook/
+git add src/_shared/auth.ts src/_shared/auth_test.ts src/telegram-webhook/ src/worker.ts wrangler.toml
 git commit -m "Add webhook dispatcher skeleton with secret-token auth"
 ```
 
@@ -1251,12 +1282,12 @@ git commit -m "Add webhook dispatcher skeleton with secret-token auth"
 ### Task 5: Venue clock helper, `/start`, and the persistent employee panel
 
 **Files:**
-- Create: `supabase/functions/_shared/time.ts`
-- Test: `supabase/functions/_shared/time_test.ts`
-- Create: `supabase/functions/telegram-webhook/keyboards.ts`
-- Create: `supabase/functions/telegram-webhook/handlers/start.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/start_test.ts`
-- Modify: `supabase/functions/telegram-webhook/router.ts`
+- Create: `src/_shared/time.ts`
+- Test: `src/_shared/time_test.ts`
+- Create: `src/telegram-webhook/keyboards.ts`
+- Create: `src/telegram-webhook/handlers/start.ts`
+- Test: `src/telegram-webhook/handlers/start_test.ts`
+- Modify: `src/telegram-webhook/router.ts`
 
 **Interfaces:**
 - Consumes: `Store`, `Shift` from Task 3; `TelegramClient`, `TelegramMessage`, `ReplyKeyboard` from Task 2; `handleMessage` signature from Task 4.
@@ -1265,7 +1296,7 @@ git commit -m "Add webhook dispatcher skeleton with secret-token auth"
 - [ ] **Step 1: Write the failing test for the clock helper**
 
 ```ts
-// supabase/functions/_shared/time_test.ts
+// src/_shared/time_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { dateKeyInTimezone, weekdayInTimezone, VENUE_TZ_OFFSET_MINUTES } from "./time.ts";
 
@@ -1286,13 +1317,13 @@ Deno.test("weekdayInTimezone maps Monday to 0 and Sunday to 6", () => {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `deno test supabase/functions/_shared/time_test.ts`
+Run: `deno test src/_shared/time_test.ts`
 Expected: FAIL — `time.ts` does not exist yet.
 
 - [ ] **Step 3: Implement the clock helper**
 
 ```ts
-// supabase/functions/_shared/time.ts
+// src/_shared/time.ts
 
 // The venue is in Moscow (UTC+3, no DST) — hardcoded because this bot serves one location (spec §2).
 export const VENUE_TZ_OFFSET_MINUTES = 180;
@@ -1319,13 +1350,13 @@ export function todayWeekday(now: Date = new Date()): number {
 
 - [ ] **Step 4: Run it to verify it passes**
 
-Run: `deno test supabase/functions/_shared/time_test.ts`
+Run: `deno test src/_shared/time_test.ts`
 Expected: PASS (2 tests).
 
 - [ ] **Step 5: Write the failing test for `/start`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/start_test.ts
+// src/telegram-webhook/handlers/start_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
@@ -1397,13 +1428,13 @@ Deno.test("an admin who is not also an employee gets pointed at /admin, with no 
 
 - [ ] **Step 6: Run it to verify it fails**
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/start_test.ts`
+Run: `deno test src/telegram-webhook/handlers/start_test.ts`
 Expected: FAIL — `start.ts` and `keyboards.ts` don't exist yet.
 
 - [ ] **Step 7: Implement `keyboards.ts` and `start.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/keyboards.ts
+// src/telegram-webhook/keyboards.ts
 import type { ReplyKeyboard } from "../_shared/telegram.ts";
 import type { Shift } from "../_shared/store.ts";
 
@@ -1417,7 +1448,7 @@ export function renderEmployeeKeyboard(shift: Shift | null): ReplyKeyboard {
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/start.ts
+// src/telegram-webhook/handlers/start.ts
 import type { Store } from "../../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
 import { todayDateKey } from "../../_shared/time.ts";
@@ -1458,7 +1489,7 @@ export async function handleStart(
 - [ ] **Step 8: Wire `/start` into the router**
 
 ```ts
-// supabase/functions/telegram-webhook/router.ts
+// src/telegram-webhook/router.ts
 import type { Store } from "../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../_shared/telegram.ts";
 import { handleStart } from "./handlers/start.ts";
@@ -1479,13 +1510,13 @@ export async function handleMessage(
 
 - [ ] **Step 9: Run both test files to verify everything passes**
 
-Run: `deno test supabase/functions/_shared/time_test.ts supabase/functions/telegram-webhook/handlers/start_test.ts supabase/functions/telegram-webhook/handleUpdate_test.ts`
+Run: `deno test src/_shared/time_test.ts src/telegram-webhook/handlers/start_test.ts src/telegram-webhook/handleUpdate_test.ts`
 Expected: PASS — including the Task 4 `handleUpdate_test.ts`, since `/start` is now handled but the unrecognized-text case must still fall through unchanged.
 
 - [ ] **Step 10: Commit**
 
 ```bash
-git add supabase/functions/_shared/time.ts supabase/functions/_shared/time_test.ts supabase/functions/telegram-webhook/keyboards.ts supabase/functions/telegram-webhook/handlers/start.ts supabase/functions/telegram-webhook/handlers/start_test.ts supabase/functions/telegram-webhook/router.ts
+git add src/_shared/time.ts src/_shared/time_test.ts src/telegram-webhook/keyboards.ts src/telegram-webhook/handlers/start.ts src/telegram-webhook/handlers/start_test.ts src/telegram-webhook/router.ts
 git commit -m "Add /start handler and persistent employee panel keyboard"
 ```
 
@@ -1494,17 +1525,17 @@ git commit -m "Add /start handler and persistent employee panel keyboard"
 ### Task 6: Open-shift flow (checklist, размен, discrepancy warning)
 
 **Files:**
-- Modify: `supabase/functions/_shared/time.ts` (add `formatVenueTime`)
-- Modify: `supabase/functions/_shared/time_test.ts`
-- Create: `supabase/functions/_shared/notify.ts`
-- Test: `supabase/functions/_shared/notify_test.ts`
-- Create: `supabase/functions/telegram-webhook/checklist.ts`
-- Test: `supabase/functions/telegram-webhook/checklist_test.ts`
-- Create: `supabase/functions/telegram-webhook/handlers/open.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/open_test.ts`
-- Modify: `supabase/functions/telegram-webhook/router.ts`
-- Modify: `supabase/functions/telegram-webhook/callbackRouter.ts`
-- Modify: `supabase/functions/telegram-webhook/handleUpdate_test.ts`
+- Modify: `src/_shared/time.ts` (add `formatVenueTime`)
+- Modify: `src/_shared/time_test.ts`
+- Create: `src/_shared/notify.ts`
+- Test: `src/_shared/notify_test.ts`
+- Create: `src/telegram-webhook/checklist.ts`
+- Test: `src/telegram-webhook/checklist_test.ts`
+- Create: `src/telegram-webhook/handlers/open.ts`
+- Test: `src/telegram-webhook/handlers/open_test.ts`
+- Modify: `src/telegram-webhook/router.ts`
+- Modify: `src/telegram-webhook/callbackRouter.ts`
+- Modify: `src/telegram-webhook/handleUpdate_test.ts`
 
 **Interfaces:**
 - Consumes: `Store`, `Shift`, `ChecklistItem`, `ChecklistProgress` from Task 3; `TelegramClient` (incl. `editMessageReplyMarkup`), `InlineKeyboard`, `TelegramCallbackQuery`, `TelegramMessage` from Task 2; `todayDateKey` from Task 5; `renderEmployeeKeyboard` from Task 5.
@@ -1513,7 +1544,7 @@ git commit -m "Add /start handler and persistent employee panel keyboard"
 - [ ] **Step 1: Write the failing test for `formatVenueTime`**
 
 ```ts
-// append to supabase/functions/_shared/time_test.ts
+// append to src/_shared/time_test.ts
 import { formatVenueTime } from "./time.ts"; // add to the existing import line instead if one exists
 
 Deno.test("formatVenueTime renders the venue-local HH:MM for a UTC timestamp", () => {
@@ -1524,19 +1555,19 @@ Deno.test("formatVenueTime renders the venue-local HH:MM for a UTC timestamp", (
 - [ ] **Step 2: Run it, confirm it fails, then implement `formatVenueTime`**
 
 ```ts
-// append to supabase/functions/_shared/time.ts
+// append to src/_shared/time.ts
 export function formatVenueTime(iso: string): string {
   const shifted = new Date(new Date(iso).getTime() + VENUE_TZ_OFFSET_MINUTES * 60_000);
   return shifted.toISOString().slice(11, 16);
 }
 ```
 
-Run: `deno test supabase/functions/_shared/time_test.ts` — Expected: PASS.
+Run: `deno test src/_shared/time_test.ts` — Expected: PASS.
 
 - [ ] **Step 3: Write the failing test for `notifyAdmins`**
 
 ```ts
-// supabase/functions/_shared/notify_test.ts
+// src/_shared/notify_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "./store.ts";
 import type { TelegramClient } from "./telegram.ts";
@@ -1574,7 +1605,7 @@ Deno.test("notifyAdmins is a no-op when there are no admins yet", async () => {
 - [ ] **Step 4: Run it, confirm it fails, then implement `notify.ts`**
 
 ```ts
-// supabase/functions/_shared/notify.ts
+// src/_shared/notify.ts
 import type { Store } from "./store.ts";
 import type { TelegramClient } from "./telegram.ts";
 
@@ -1586,12 +1617,12 @@ export async function notifyAdmins(store: Store, telegram: TelegramClient, text:
 }
 ```
 
-Run: `deno test supabase/functions/_shared/notify_test.ts` — Expected: PASS.
+Run: `deno test src/_shared/notify_test.ts` — Expected: PASS.
 
 - [ ] **Step 5: Write the failing tests for the checklist keyboard helpers**
 
 ```ts
-// supabase/functions/telegram-webhook/checklist_test.ts
+// src/telegram-webhook/checklist_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { isChecklistComplete, renderChecklistKeyboard } from "./checklist.ts";
 import type { ChecklistItem, ChecklistProgress } from "../_shared/store.ts";
@@ -1630,7 +1661,7 @@ Deno.test("isChecklistComplete is false for an empty checklist (nothing to confi
 - [ ] **Step 6: Run it, confirm it fails, then implement `checklist.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/checklist.ts
+// src/telegram-webhook/checklist.ts
 import type { ChecklistItem, ChecklistProgress } from "../_shared/store.ts";
 import type { InlineKeyboard } from "../_shared/telegram.ts";
 
@@ -1652,12 +1683,12 @@ export function isChecklistComplete(items: ChecklistItem[], progress: ChecklistP
 }
 ```
 
-Run: `deno test supabase/functions/telegram-webhook/checklist_test.ts` — Expected: PASS.
+Run: `deno test src/telegram-webhook/checklist_test.ts` — Expected: PASS.
 
 - [ ] **Step 7: Write the failing tests for the open-shift handlers**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/open_test.ts
+// src/telegram-webhook/handlers/open_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
@@ -1814,13 +1845,13 @@ Deno.test("the first-ever shift for an employee opens cleanly with no previous s
 
 - [ ] **Step 8: Run the tests to verify they fail**
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/open_test.ts`
+Run: `deno test src/telegram-webhook/handlers/open_test.ts`
 Expected: FAIL — `open.ts` does not exist yet.
 
 - [ ] **Step 9: Implement `handlers/open.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/open.ts
+// src/telegram-webhook/handlers/open.ts
 import type { Store } from "../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
 import { formatVenueTime, todayDateKey } from "../../_shared/time.ts";
@@ -1953,7 +1984,7 @@ export async function handleOpenCashAmount(
 - [ ] **Step 10: Wire OPEN into the message router and the checklist callback into the callback router**
 
 ```ts
-// supabase/functions/telegram-webhook/router.ts
+// src/telegram-webhook/router.ts
 import type { Store } from "../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../_shared/telegram.ts";
 import { handleStart } from "./handlers/start.ts";
@@ -1986,7 +2017,7 @@ export async function handleMessage(
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/callbackRouter.ts
+// src/telegram-webhook/callbackRouter.ts
 import type { Store } from "../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient } from "../_shared/telegram.ts";
 import { handleOpenChecklistToggle } from "./handlers/open.ts";
@@ -2010,7 +2041,7 @@ export async function handleCallbackQuery(
 - [ ] **Step 11: Add one router-level regression check**
 
 ```ts
-// append to supabase/functions/telegram-webhook/handleUpdate_test.ts
+// append to src/telegram-webhook/handleUpdate_test.ts
 Deno.test("the OPEN button is routed to the open-shift handler, not the fallback reply", async () => {
   const store = createInMemoryStore();
   await store.addEmployee(1, "Анна");
@@ -2028,13 +2059,13 @@ Deno.test("the OPEN button is routed to the open-shift handler, not the fallback
 
 - [ ] **Step 12: Run every test file touched so far**
 
-Run: `deno test supabase/functions/`
+Run: `deno test src/`
 Expected: PASS — all suites from Tasks 1–6 green.
 
 - [ ] **Step 13: Commit**
 
 ```bash
-git add supabase/functions/_shared/time.ts supabase/functions/_shared/time_test.ts supabase/functions/_shared/notify.ts supabase/functions/_shared/notify_test.ts supabase/functions/telegram-webhook/checklist.ts supabase/functions/telegram-webhook/checklist_test.ts supabase/functions/telegram-webhook/handlers/open.ts supabase/functions/telegram-webhook/handlers/open_test.ts supabase/functions/telegram-webhook/router.ts supabase/functions/telegram-webhook/callbackRouter.ts supabase/functions/telegram-webhook/handleUpdate_test.ts
+git add src/_shared/time.ts src/_shared/time_test.ts src/_shared/notify.ts src/_shared/notify_test.ts src/telegram-webhook/checklist.ts src/telegram-webhook/checklist_test.ts src/telegram-webhook/handlers/open.ts src/telegram-webhook/handlers/open_test.ts src/telegram-webhook/router.ts src/telegram-webhook/callbackRouter.ts src/telegram-webhook/handleUpdate_test.ts
 git commit -m "Add open-shift checklist, размен entry, and discrepancy warning"
 ```
 
@@ -2043,10 +2074,10 @@ git commit -m "Add open-shift checklist, размен entry, and discrepancy war
 ### Task 7: Close-shift flow (checklist with photo items, closing float amount)
 
 **Files:**
-- Create: `supabase/functions/telegram-webhook/handlers/close.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/close_test.ts`
-- Modify: `supabase/functions/telegram-webhook/router.ts`
-- Modify: `supabase/functions/telegram-webhook/callbackRouter.ts`
+- Create: `src/telegram-webhook/handlers/close.ts`
+- Test: `src/telegram-webhook/handlers/close_test.ts`
+- Modify: `src/telegram-webhook/router.ts`
+- Modify: `src/telegram-webhook/callbackRouter.ts`
 
 **Interfaces:**
 - Consumes: everything Task 6 produces (`notifyAdmins`, `renderChecklistKeyboard`, `isChecklistComplete`, `renderEmployeeKeyboard`, `formatVenueTime`, `todayDateKey`) plus `Store`/`TelegramClient` types.
@@ -2055,7 +2086,7 @@ git commit -m "Add open-shift checklist, размен entry, and discrepancy war
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/close_test.ts
+// src/telegram-webhook/handlers/close_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
@@ -2236,13 +2267,13 @@ Deno.test("a valid closing float amount closes the shift, confirms to the employ
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/close_test.ts`
+Run: `deno test src/telegram-webhook/handlers/close_test.ts`
 Expected: FAIL — `close.ts` does not exist yet.
 
 - [ ] **Step 3: Implement `handlers/close.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/close.ts
+// src/telegram-webhook/handlers/close.ts
 import type { Store } from "../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
 import { formatVenueTime, todayDateKey } from "../../_shared/time.ts";
@@ -2413,13 +2444,13 @@ export async function handleClosingFloatAmount(
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/close_test.ts`
+Run: `deno test src/telegram-webhook/handlers/close_test.ts`
 Expected: PASS (10 tests).
 
 - [ ] **Step 5: Wire CLOSER, the close checklist callback, and the two new session states into the routers**
 
 ```ts
-// supabase/functions/telegram-webhook/router.ts
+// src/telegram-webhook/router.ts
 import type { Store } from "../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../_shared/telegram.ts";
 import { handleStart } from "./handlers/start.ts";
@@ -2464,7 +2495,7 @@ export async function handleMessage(
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/callbackRouter.ts
+// src/telegram-webhook/callbackRouter.ts
 import type { Store } from "../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient } from "../_shared/telegram.ts";
 import { handleOpenChecklistToggle } from "./handlers/open.ts";
@@ -2492,13 +2523,13 @@ export async function handleCallbackQuery(
 
 - [ ] **Step 6: Run every test file touched so far**
 
-Run: `deno test supabase/functions/`
+Run: `deno test src/`
 Expected: PASS — all suites from Tasks 1–7 green.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add supabase/functions/telegram-webhook/handlers/close.ts supabase/functions/telegram-webhook/handlers/close_test.ts supabase/functions/telegram-webhook/router.ts supabase/functions/telegram-webhook/callbackRouter.ts
+git add src/telegram-webhook/handlers/close.ts src/telegram-webhook/handlers/close_test.ts src/telegram-webhook/router.ts src/telegram-webhook/callbackRouter.ts
 git commit -m "Add close-shift checklist with photo capture and closing float amount"
 ```
 
@@ -2507,10 +2538,10 @@ git commit -m "Add close-shift checklist with photo capture and closing float am
 ### Task 8: Manual X-report flow
 
 **Files:**
-- Create: `supabase/functions/telegram-webhook/handlers/xreport.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/xreport_test.ts`
-- Modify: `supabase/functions/telegram-webhook/router.ts`
-- Modify: `supabase/functions/telegram-webhook/callbackRouter.ts`
+- Create: `src/telegram-webhook/handlers/xreport.ts`
+- Test: `src/telegram-webhook/handlers/xreport_test.ts`
+- Modify: `src/telegram-webhook/router.ts`
+- Modify: `src/telegram-webhook/callbackRouter.ts`
 
 **Interfaces:**
 - Consumes: `notifyAdmins`, `formatVenueTime`, `todayDateKey` from Task 6; `Store`/`TelegramClient` types.
@@ -2519,7 +2550,7 @@ git commit -m "Add close-shift checklist with photo capture and closing float am
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/xreport_test.ts
+// src/telegram-webhook/handlers/xreport_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
@@ -2615,13 +2646,13 @@ Deno.test("a numeric cashless figure saves the report, confirms to the employee,
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/xreport_test.ts`
+Run: `deno test src/telegram-webhook/handlers/xreport_test.ts`
 Expected: FAIL — `xreport.ts` does not exist yet.
 
 - [ ] **Step 3: Implement `handlers/xreport.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/xreport.ts
+// src/telegram-webhook/handlers/xreport.ts
 import type { Store } from "../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
 import { formatVenueTime, todayDateKey } from "../../_shared/time.ts";
@@ -2710,13 +2741,13 @@ export async function handleXreportCashless(
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/xreport_test.ts`
+Run: `deno test src/telegram-webhook/handlers/xreport_test.ts`
 Expected: PASS (6 tests).
 
 - [ ] **Step 5: Wire the X-report button, its inline-button twin, and the two session states into the routers**
 
 ```ts
-// supabase/functions/telegram-webhook/router.ts — add these two branches to the session-state checks
+// src/telegram-webhook/router.ts — add these two branches to the session-state checks
   if (session.state === "awaiting_xreport_cash") {
     await handleXreportCash(store, telegram, message, session.data.shiftId as string);
     return;
@@ -2728,7 +2759,7 @@ Expected: PASS (6 tests).
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/router.ts — add this branch next to the other text-command checks
+// src/telegram-webhook/router.ts — add this branch next to the other text-command checks
   if (message.text === "🧾 Контрольный X-отчёт") {
     await handleXreportButton(store, telegram, message);
     return;
@@ -2741,7 +2772,7 @@ import { handleXreportButton, handleXreportCash, handleXreportCashless } from ".
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/callbackRouter.ts — add this branch, plus its import
+// src/telegram-webhook/callbackRouter.ts — add this branch, plus its import
 import { handleXreportStartCallback } from "./handlers/xreport.ts";
 // ...
   if (callbackQuery.data === "xreport:start") {
@@ -2752,13 +2783,13 @@ import { handleXreportStartCallback } from "./handlers/xreport.ts";
 
 - [ ] **Step 6: Run every test file touched so far**
 
-Run: `deno test supabase/functions/`
+Run: `deno test src/`
 Expected: PASS — all suites from Tasks 1–8 green.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add supabase/functions/telegram-webhook/handlers/xreport.ts supabase/functions/telegram-webhook/handlers/xreport_test.ts supabase/functions/telegram-webhook/router.ts supabase/functions/telegram-webhook/callbackRouter.ts
+git add src/telegram-webhook/handlers/xreport.ts src/telegram-webhook/handlers/xreport_test.ts src/telegram-webhook/router.ts src/telegram-webhook/callbackRouter.ts
 git commit -m "Add manual X-report flow"
 ```
 
@@ -2766,22 +2797,24 @@ git commit -m "Add manual X-report flow"
 
 ### Task 9: Scheduled reminders and lateness detection (`cron-tick`)
 
+Cloudflare Cron Triggers call a Worker's `scheduled` export directly — no HTTP request, no secret header, no self-invocation trick like the Supabase `pg_cron` + `pg_net` combination this replaced would have needed. `src/worker.ts` (Task 4) ends up exporting both `fetch` and `scheduled` from the one deployed Worker.
+
 **Files:**
-- Create: `supabase/functions/_shared/reminders.ts` (pure decision logic)
-- Test: `supabase/functions/_shared/reminders_test.ts`
-- Create: `supabase/functions/cron-tick/run.ts`
-- Test: `supabase/functions/cron-tick/run_test.ts`
-- Create: `supabase/functions/cron-tick/index.ts`
-- Create: `supabase/migrations/0002_cron.sql`
+- Create: `src/_shared/reminders.ts` (pure decision logic)
+- Test: `src/_shared/reminders_test.ts`
+- Create: `src/cron-tick/run.ts`
+- Test: `src/cron-tick/run_test.ts`
+- Modify: `src/worker.ts` (add the `scheduled` export)
+- Modify: `wrangler.toml` (add the `[triggers]` cron schedule)
 
 **Interfaces:**
-- Consumes: `ScheduleDay`, `Shift`, `Store`, `Employee` from Task 3; `todayDateKey`, `todayWeekday`, `VENUE_TZ_OFFSET_MINUTES` from Task 5; `notifyAdmins` from Task 6; the `"xreport:start"` callback data from Task 8.
+- Consumes: `ScheduleDay`, `Shift`, `Store`, `Employee` from Task 3; `todayDateKey`, `todayWeekday`, `VENUE_TZ_OFFSET_MINUTES` from Task 5; `notifyAdmins` from Task 6; the `"xreport:start"` callback data from Task 8; `Env` from Task 4's `src/worker.ts`.
 - Produces: `decideReminders(now, scheduleDay, shift): ReminderAction[]` and `runCronTick(store, telegram, now?): Promise<void>` — nothing later depends on these beyond Task 14's deployment wiring.
 
 - [ ] **Step 1: Write the failing tests for the pure reminder logic**
 
 ```ts
-// supabase/functions/_shared/reminders_test.ts
+// src/_shared/reminders_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { decideReminders } from "./reminders.ts";
 import type { ScheduleDay, Shift } from "./store.ts";
@@ -2857,13 +2890,13 @@ Deno.test("an open shift can get both remind_close and remind_xreport on the sam
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `deno test supabase/functions/_shared/reminders_test.ts`
+Run: `deno test src/_shared/reminders_test.ts`
 Expected: FAIL — `reminders.ts` does not exist yet.
 
 - [ ] **Step 3: Implement `reminders.ts`**
 
 ```ts
-// supabase/functions/_shared/reminders.ts
+// src/_shared/reminders.ts
 import type { ScheduleDay, Shift } from "./store.ts";
 import { VENUE_TZ_OFFSET_MINUTES } from "./time.ts";
 
@@ -2916,13 +2949,13 @@ export function decideReminders(now: Date, scheduleDay: ScheduleDay, shift: Shif
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `deno test supabase/functions/_shared/reminders_test.ts`
+Run: `deno test src/_shared/reminders_test.ts`
 Expected: PASS (10 tests).
 
 - [ ] **Step 5: Write the failing tests for `runCronTick`**
 
 ```ts
-// supabase/functions/cron-tick/run_test.ts
+// src/cron-tick/run_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../_shared/store.ts";
 import type { TelegramClient } from "../_shared/telegram.ts";
@@ -3007,13 +3040,13 @@ Deno.test("a shift already closed today is left alone (no reminders re-fire afte
 
 - [ ] **Step 6: Run the tests to verify they fail**
 
-Run: `deno test supabase/functions/cron-tick/run_test.ts`
+Run: `deno test src/cron-tick/run_test.ts`
 Expected: FAIL — `run.ts` does not exist yet.
 
 - [ ] **Step 7: Implement `cron-tick/run.ts`**
 
 ```ts
-// supabase/functions/cron-tick/run.ts
+// src/cron-tick/run.ts
 import type { Employee, ScheduleDay, Shift, Store } from "../_shared/store.ts";
 import type { TelegramClient } from "../_shared/telegram.ts";
 import { todayDateKey, todayWeekday } from "../_shared/time.ts";
@@ -3089,65 +3122,72 @@ async function applyAction(
 
 - [ ] **Step 8: Run the tests to verify they pass**
 
-Run: `deno test supabase/functions/cron-tick/run_test.ts`
+Run: `deno test src/cron-tick/run_test.ts`
 Expected: PASS (5 tests).
 
-- [ ] **Step 9: Implement the `cron-tick` entry point**
+- [ ] **Step 9: Add the `scheduled` export to `src/worker.ts`**
 
 ```ts
-// supabase/functions/cron-tick/index.ts
-import { createSupabaseStore } from "../_shared/supabaseStore.ts";
-import { createTelegramClient } from "../_shared/telegram.ts";
-import { runCronTick } from "./run.ts";
+// src/worker.ts — full file, replacing Task 4's version: adds the `runCronTick` import
+// and the `scheduled` export; the `fetch` export's body is exactly what Task 4 wrote.
+import { createD1Store } from "./_shared/d1Store.ts";
+import { createTelegramClient } from "./_shared/telegram.ts";
+import { isAuthorized } from "./_shared/auth.ts";
+import type { TelegramUpdate } from "./_shared/telegram.ts";
+import { handleUpdate } from "./telegram-webhook/handleUpdate.ts";
+import { runCronTick } from "./cron-tick/run.ts";
 
-Deno.serve(async (req) => {
-  const secret = Deno.env.get("CRON_SECRET");
-  if (secret && req.headers.get("x-cron-secret") !== secret) {
-    return new Response("forbidden", { status: 403 });
-  }
+export interface Env {
+  DB: D1Database;
+  TELEGRAM_BOT_TOKEN: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
+}
 
-  const store = createSupabaseStore(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-  const telegram = createTelegramClient(Deno.env.get("TELEGRAM_BOT_TOKEN")!);
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (!isAuthorized(request, env.TELEGRAM_WEBHOOK_SECRET)) {
+      return new Response("forbidden", { status: 403 });
+    }
 
-  try {
-    await runCronTick(store, telegram);
-  } catch (err) {
-    console.error("runCronTick failed", err);
-  }
-  return new Response("ok", { status: 200 });
-});
+    const update = (await request.json()) as TelegramUpdate;
+    const store = createD1Store(env.DB);
+    const telegram = createTelegramClient(env.TELEGRAM_BOT_TOKEN);
+
+    try {
+      await handleUpdate(store, telegram, update);
+    } catch (err) {
+      console.error("handleUpdate failed", err);
+    }
+    return new Response("ok", { status: 200 });
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    const store = createD1Store(env.DB);
+    const telegram = createTelegramClient(env.TELEGRAM_BOT_TOKEN);
+    try {
+      await runCronTick(store, telegram);
+    } catch (err) {
+      console.error("runCronTick failed", err);
+    }
+  },
+};
 ```
 
-- [ ] **Step 10: Write the migration that schedules `cron-tick` every 5 minutes**
+(`ScheduledEvent` is another ambient type from `@cloudflare/workers-types`, same as `D1Database`.)
 
-```sql
--- supabase/migrations/0002_cron.sql
-create extension if not exists pg_net;
-create extension if not exists pg_cron;
+- [ ] **Step 10: Schedule the cron trigger in `wrangler.toml`**
 
-select cron.schedule(
-  'smena-bot-cron-tick',
-  '*/5 * * * *',
-  $$
-  select net.http_post(
-    url := current_setting('app.settings.cron_tick_url'),
-    headers := jsonb_build_object(
-      'Content-Type', 'application/json',
-      'x-cron-secret', current_setting('app.settings.cron_secret')
-    ),
-    body := '{}'::jsonb
-  );
-  $$
-);
+```toml
+# wrangler.toml — add this block
+[triggers]
+crons = ["*/5 * * * *"]
 ```
-
-This reads `app.settings.cron_tick_url` and `app.settings.cron_secret` rather than hardcoding them, because the deployed function URL and secret are project-specific and are set in Task 14 via `alter database ... set app.settings.cron_tick_url = '...'` after the function is deployed.
 
 - [ ] **Step 11: Commit**
 
 ```bash
-git add supabase/functions/_shared/reminders.ts supabase/functions/_shared/reminders_test.ts supabase/functions/cron-tick/ supabase/migrations/0002_cron.sql
-git commit -m "Add scheduled reminders, lateness detection, and pg_cron wiring"
+git add src/_shared/reminders.ts src/_shared/reminders_test.ts src/cron-tick/ src/worker.ts wrangler.toml
+git commit -m "Add scheduled reminders, lateness detection, and a Cloudflare Cron Trigger"
 ```
 
 ---
@@ -3155,12 +3195,12 @@ git commit -m "Add scheduled reminders, lateness detection, and pg_cron wiring"
 ### Task 10: Employee static content — Инструкции and Сроки годности
 
 **Files:**
-- Create: `supabase/functions/telegram-webhook/handlers/instructions.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/instructions_test.ts`
-- Create: `supabase/functions/telegram-webhook/handlers/expiry.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/expiry_test.ts`
-- Modify: `supabase/functions/telegram-webhook/router.ts`
-- Modify: `supabase/functions/telegram-webhook/callbackRouter.ts`
+- Create: `src/telegram-webhook/handlers/instructions.ts`
+- Test: `src/telegram-webhook/handlers/instructions_test.ts`
+- Create: `src/telegram-webhook/handlers/expiry.ts`
+- Test: `src/telegram-webhook/handlers/expiry_test.ts`
+- Modify: `src/telegram-webhook/router.ts`
+- Modify: `src/telegram-webhook/callbackRouter.ts`
 
 **Interfaces:**
 - Consumes: `InstructionArticle`, `ExpiryItem`, `Store` from Task 3.
@@ -3169,7 +3209,7 @@ git commit -m "Add scheduled reminders, lateness detection, and pg_cron wiring"
 - [ ] **Step 1: Write the failing tests for Инструкции**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/instructions_test.ts
+// src/telegram-webhook/handlers/instructions_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
@@ -3241,7 +3281,7 @@ Deno.test("showing a deleted/unknown article id fails gracefully instead of cras
 - [ ] **Step 2: Run it, confirm it fails, then implement `instructions.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/instructions.ts
+// src/telegram-webhook/handlers/instructions.ts
 import type { Store } from "../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
 
@@ -3279,12 +3319,12 @@ export async function handleInstructionShow(
 }
 ```
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/instructions_test.ts` — Expected: PASS (5 tests).
+Run: `deno test src/telegram-webhook/handlers/instructions_test.ts` — Expected: PASS (5 tests).
 
 - [ ] **Step 3: Write the failing tests for Сроки годности**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/expiry_test.ts
+// src/telegram-webhook/handlers/expiry_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
@@ -3327,7 +3367,7 @@ Deno.test("the expiry list is formatted as one 'name — N суток' line per 
 - [ ] **Step 4: Run it, confirm it fails, then implement `expiry.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/expiry.ts
+// src/telegram-webhook/handlers/expiry.ts
 import type { Store } from "../../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
 
@@ -3346,12 +3386,12 @@ export async function handleExpiryList(
 }
 ```
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/expiry_test.ts` — Expected: PASS (2 tests).
+Run: `deno test src/telegram-webhook/handlers/expiry_test.ts` — Expected: PASS (2 tests).
 
 - [ ] **Step 5: Wire both into the routers**
 
 ```ts
-// supabase/functions/telegram-webhook/router.ts — add next to the other text-command checks, with matching imports
+// src/telegram-webhook/router.ts — add next to the other text-command checks, with matching imports
   if (message.text === "📖 Инструкции") {
     await handleInstructionsMenu(store, telegram, message);
     return;
@@ -3363,7 +3403,7 @@ Run: `deno test supabase/functions/telegram-webhook/handlers/expiry_test.ts` —
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/callbackRouter.ts — add next to the "chk" branches, with matching import
+// src/telegram-webhook/callbackRouter.ts — add next to the "chk" branches, with matching import
   if (kind === "instr" && phase === "show" && itemId) {
     await handleInstructionShow(store, telegram, callbackQuery, itemId);
     return;
@@ -3372,13 +3412,13 @@ Run: `deno test supabase/functions/telegram-webhook/handlers/expiry_test.ts` —
 
 - [ ] **Step 6: Run every test file touched so far**
 
-Run: `deno test supabase/functions/`
+Run: `deno test src/`
 Expected: PASS — all suites from Tasks 1–10 green.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add supabase/functions/telegram-webhook/handlers/instructions.ts supabase/functions/telegram-webhook/handlers/instructions_test.ts supabase/functions/telegram-webhook/handlers/expiry.ts supabase/functions/telegram-webhook/handlers/expiry_test.ts supabase/functions/telegram-webhook/router.ts supabase/functions/telegram-webhook/callbackRouter.ts
+git add src/telegram-webhook/handlers/instructions.ts src/telegram-webhook/handlers/instructions_test.ts src/telegram-webhook/handlers/expiry.ts src/telegram-webhook/handlers/expiry_test.ts src/telegram-webhook/router.ts src/telegram-webhook/callbackRouter.ts
 git commit -m "Add employee-facing Инструкции and Сроки годности views"
 ```
 
@@ -3389,18 +3429,18 @@ git commit -m "Add employee-facing Инструкции and Сроки годн�
 The three admin sections in this task are all "add a line of text / delete a row" lists, so they share one editor component instead of three copies of the same add/delete logic. Task 12 (Инструкции — title+body+media) and Task 13 (Сотрудники/Администраторы — capture-by-forward) need different interaction shapes and get their own code.
 
 **Files:**
-- Create: `supabase/functions/telegram-webhook/messages.ts`
-- Create: `supabase/functions/telegram-webhook/handlers/admin/entry.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/admin/entry_test.ts`
-- Create: `supabase/functions/telegram-webhook/handlers/admin/listEditor.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/admin/listEditor_test.ts`
-- Create: `supabase/functions/telegram-webhook/handlers/admin/listEditorConfigs.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/admin/listEditorConfigs_test.ts`
-- Create: `supabase/functions/telegram-webhook/handlers/admin/menu.ts`
-- Create: `supabase/functions/telegram-webhook/handlers/admin/router.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/admin/router_test.ts`
-- Modify: `supabase/functions/telegram-webhook/router.ts`
-- Modify: `supabase/functions/telegram-webhook/callbackRouter.ts`
+- Create: `src/telegram-webhook/messages.ts`
+- Create: `src/telegram-webhook/handlers/admin/entry.ts`
+- Test: `src/telegram-webhook/handlers/admin/entry_test.ts`
+- Create: `src/telegram-webhook/handlers/admin/listEditor.ts`
+- Test: `src/telegram-webhook/handlers/admin/listEditor_test.ts`
+- Create: `src/telegram-webhook/handlers/admin/listEditorConfigs.ts`
+- Test: `src/telegram-webhook/handlers/admin/listEditorConfigs_test.ts`
+- Create: `src/telegram-webhook/handlers/admin/menu.ts`
+- Create: `src/telegram-webhook/handlers/admin/router.ts`
+- Test: `src/telegram-webhook/handlers/admin/router_test.ts`
+- Modify: `src/telegram-webhook/router.ts`
+- Modify: `src/telegram-webhook/callbackRouter.ts`
 
 **Interfaces:**
 - Consumes: `Store`, `ChecklistItem`, `ExpiryItem` from Task 3; `TelegramClient`, `InlineKeyboard` from Task 2.
@@ -3409,7 +3449,7 @@ The three admin sections in this task are all "add a line of text / delete a row
 - [ ] **Step 1: Write the failing test for the shared "unknown command" text and admin entry**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/entry_test.ts
+// src/telegram-webhook/handlers/admin/entry_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
@@ -3453,12 +3493,12 @@ Deno.test("/admin from a registered admin shows the six-section menu", async () 
 - [ ] **Step 2: Run it, confirm it fails, then implement `messages.ts`, `admin/menu.ts`, and `admin/entry.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/messages.ts
+// src/telegram-webhook/messages.ts
 export const UNKNOWN_COMMAND_TEXT = "Не понимаю эту команду. Используйте кнопки внизу экрана.";
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/menu.ts
+// src/telegram-webhook/handlers/admin/menu.ts
 import type { Store } from "../../../_shared/store.ts";
 import type { InlineKeyboard, TelegramCallbackQuery, TelegramClient } from "../../../_shared/telegram.ts";
 import { openListEditor } from "./listEditor.ts";
@@ -3495,7 +3535,7 @@ export async function handleAdminMenuSelect(
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/entry.ts
+// src/telegram-webhook/handlers/admin/entry.ts
 import type { Store } from "../../../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
 import { UNKNOWN_COMMAND_TEXT } from "../../messages.ts";
@@ -3515,12 +3555,12 @@ export async function handleAdminEntry(
 }
 ```
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/admin/entry_test.ts` — Expected: PASS (2 tests) once Step 5 below also exists (this file imports `listEditor.ts`/`listEditorConfigs.ts` transitively; write all of Steps 2–6 before running if your editor errors on missing imports).
+Run: `deno test src/telegram-webhook/handlers/admin/entry_test.ts` — Expected: PASS (2 tests) once Step 5 below also exists (this file imports `listEditor.ts`/`listEditorConfigs.ts` transitively; write all of Steps 2–6 before running if your editor errors on missing imports).
 
 - [ ] **Step 3: Write the failing tests for the checklist/expiry list-editor configs**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/listEditorConfigs_test.ts
+// src/telegram-webhook/handlers/admin/listEditorConfigs_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../../_shared/store.ts";
 import { checklistCloseConfig, checklistOpenConfig, expiryConfig } from "./listEditorConfigs.ts";
@@ -3573,7 +3613,7 @@ Deno.test("expiryConfig.addFromText rejects a line with no number", async () => 
 - [ ] **Step 4: Run it, confirm it fails, then implement `listEditorConfigs.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/listEditorConfigs.ts
+// src/telegram-webhook/handlers/admin/listEditorConfigs.ts
 import type { Store } from "../../../_shared/store.ts";
 import type { ListEditorConfig, ListEditorRow } from "./listEditor.ts";
 
@@ -3647,12 +3687,12 @@ export const LIST_EDITOR_CONFIGS: Record<string, ListEditorConfig> = {
 };
 ```
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/admin/listEditorConfigs_test.ts` — Expected: PASS (6 tests) once `listEditor.ts` (Step 5) exists for the type import.
+Run: `deno test src/telegram-webhook/handlers/admin/listEditorConfigs_test.ts` — Expected: PASS (6 tests) once `listEditor.ts` (Step 5) exists for the type import.
 
 - [ ] **Step 5: Write the failing tests for the generic list-editor component**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/listEditor_test.ts
+// src/telegram-webhook/handlers/admin/listEditor_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
@@ -3737,7 +3777,7 @@ Deno.test("handleListEditorDone clears the add-text session so plain chat resume
 - [ ] **Step 6: Run it, confirm it fails, then implement `listEditor.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/listEditor.ts
+// src/telegram-webhook/handlers/admin/listEditor.ts
 import type { Store } from "../../../_shared/store.ts";
 import type { InlineKeyboard, TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
 
@@ -3816,12 +3856,12 @@ export async function handleListEditorDone(
 }
 ```
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/admin/` — Expected: PASS across `entry_test.ts`, `listEditorConfigs_test.ts`, `listEditor_test.ts`.
+Run: `deno test src/telegram-webhook/handlers/admin/` — Expected: PASS across `entry_test.ts`, `listEditorConfigs_test.ts`, `listEditor_test.ts`.
 
 - [ ] **Step 7: Write the failing tests for admin callback routing, including the non-admin rejection**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/router_test.ts
+// src/telegram-webhook/handlers/admin/router_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient } from "../../../_shared/telegram.ts";
@@ -3897,7 +3937,7 @@ Deno.test("an unrecognized admin: callback is answered harmlessly instead of cra
 - [ ] **Step 8: Run it, confirm it fails, then implement `admin/router.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/router.ts
+// src/telegram-webhook/handlers/admin/router.ts
 import type { Store } from "../../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient } from "../../../_shared/telegram.ts";
 import { handleAdminMenuSelect } from "./menu.ts";
@@ -3933,12 +3973,12 @@ export async function routeAdminCallback(
 }
 ```
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/admin/router_test.ts` — Expected: PASS (5 tests).
+Run: `deno test src/telegram-webhook/handlers/admin/router_test.ts` — Expected: PASS (5 tests).
 
 - [ ] **Step 9: Wire `/admin`, the admin-only callback guard, and the add-text session into the top-level routers**
 
 ```ts
-// supabase/functions/telegram-webhook/router.ts — replace the literal fallback string with the shared constant,
+// src/telegram-webhook/router.ts — replace the literal fallback string with the shared constant,
 // add the admin_list_add session branch, and add the /admin text command
 import { UNKNOWN_COMMAND_TEXT } from "./messages.ts";
 import { handleAdminEntry } from "./handlers/admin/entry.ts";
@@ -3964,7 +4004,7 @@ import { LIST_EDITOR_CONFIGS } from "./handlers/admin/listEditorConfigs.ts";
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/callbackRouter.ts — add the admin-only guard before the final fallback
+// src/telegram-webhook/callbackRouter.ts — add the admin-only guard before the final fallback
 import { routeAdminCallback } from "./handlers/admin/router.ts";
 
 // inside handleCallbackQuery, before the generic fallback:
@@ -3982,7 +4022,7 @@ import { routeAdminCallback } from "./handlers/admin/router.ts";
 - [ ] **Step 10: Add the non-admin rejection regression test**
 
 ```ts
-// append to supabase/functions/telegram-webhook/handleUpdate_test.ts
+// append to src/telegram-webhook/handleUpdate_test.ts
 Deno.test("a non-admin tapping an admin: callback is silently rejected, no menu leaks", async () => {
   const store = createInMemoryStore();
   await store.addEmployee(1, "Анна"); // registered, but not an admin
@@ -4001,13 +4041,13 @@ Deno.test("a non-admin tapping an admin: callback is silently rejected, no menu 
 
 - [ ] **Step 11: Run every test file touched so far**
 
-Run: `deno test supabase/functions/`
+Run: `deno test src/`
 Expected: PASS — all suites from Tasks 1–11 green.
 
 - [ ] **Step 12: Commit**
 
 ```bash
-git add supabase/functions/telegram-webhook/messages.ts supabase/functions/telegram-webhook/handlers/admin/ supabase/functions/telegram-webhook/router.ts supabase/functions/telegram-webhook/callbackRouter.ts supabase/functions/telegram-webhook/handleUpdate_test.ts
+git add src/telegram-webhook/messages.ts src/telegram-webhook/handlers/admin/ src/telegram-webhook/router.ts src/telegram-webhook/callbackRouter.ts src/telegram-webhook/handleUpdate_test.ts
 git commit -m "Add /admin entry and generic list editor for checklists and sroki godnosti"
 ```
 
@@ -4018,11 +4058,11 @@ git commit -m "Add /admin entry and generic list editor for checklists and sroki
 Инструкции need two lines of text per entry (title, then body) instead of the generic editor's one line, so it gets its own small module rather than forcing it into `ListEditorConfig`.
 
 **Files:**
-- Create: `supabase/functions/telegram-webhook/handlers/admin/instructions.ts`
-- Test: `supabase/functions/telegram-webhook/handlers/admin/instructions_test.ts`
-- Modify: `supabase/functions/telegram-webhook/handlers/admin/menu.ts`
-- Modify: `supabase/functions/telegram-webhook/handlers/admin/router.ts`
-- Modify: `supabase/functions/telegram-webhook/router.ts`
+- Create: `src/telegram-webhook/handlers/admin/instructions.ts`
+- Test: `src/telegram-webhook/handlers/admin/instructions_test.ts`
+- Modify: `src/telegram-webhook/handlers/admin/menu.ts`
+- Modify: `src/telegram-webhook/handlers/admin/router.ts`
+- Modify: `src/telegram-webhook/router.ts`
 
 **Interfaces:**
 - Consumes: `Store`, `InstructionArticle` from Task 3; `openListEditor`'s sibling pattern from Task 11 (same visual language: item rows with 🗑, a trailing action row) but its own callback prefix `admin:instr:*` and its own session states `"admin_instruction_title"` (`data: {}`) and `"admin_instruction_body"` (`data: { title }`).
@@ -4031,7 +4071,7 @@ git commit -m "Add /admin entry and generic list editor for checklists and sroki
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/instructions_test.ts
+// src/telegram-webhook/handlers/admin/instructions_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
@@ -4164,13 +4204,13 @@ Deno.test("handleInstructionsDone clears any lingering session", async () => {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/admin/instructions_test.ts`
+Run: `deno test src/telegram-webhook/handlers/admin/instructions_test.ts`
 Expected: FAIL — `instructions.ts` (the admin one) does not exist yet.
 
 - [ ] **Step 3: Implement `admin/instructions.ts`**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/instructions.ts
+// src/telegram-webhook/handlers/admin/instructions.ts
 import type { Store } from "../../../_shared/store.ts";
 import type { InlineKeyboard, TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
 
@@ -4278,13 +4318,13 @@ export async function handleInstructionsDone(
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `deno test supabase/functions/telegram-webhook/handlers/admin/instructions_test.ts`
+Run: `deno test src/telegram-webhook/handlers/admin/instructions_test.ts`
 Expected: PASS (9 tests).
 
 - [ ] **Step 5: Wire Инструкции into the admin menu, the admin callback router, and the top-level message router**
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/menu.ts — add the import and the new branch at the top of handleAdminMenuSelect
+// src/telegram-webhook/handlers/admin/menu.ts — add the import and the new branch at the top of handleAdminMenuSelect
 import { openInstructionsEditor } from "./instructions.ts";
 
 export async function handleAdminMenuSelect(
@@ -4309,7 +4349,7 @@ export async function handleAdminMenuSelect(
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/handlers/admin/router.ts — add the import and three branches before the final fallback
+// src/telegram-webhook/handlers/admin/router.ts — add the import and three branches before the final fallback
 import { handleInstructionsAddStart, handleInstructionsDelete, handleInstructionsDone } from "./instructions.ts";
 
   if (parts[1] === "instr" && parts[2] === "add") {
@@ -4327,7 +4367,7 @@ import { handleInstructionsAddStart, handleInstructionsDelete, handleInstruction
 ```
 
 ```ts
-// supabase/functions/telegram-webhook/router.ts — add these two session-state branches and their imports
+// src/telegram-webhook/router.ts — add these two session-state branches and their imports
 import { handleInstructionBody, handleInstructionTitle } from "./handlers/admin/instructions.ts";
 
   if (session.state === "admin_instruction_title") {
@@ -4346,12 +4386,527 @@ import { handleInstructionBody, handleInstructionTitle } from "./handlers/admin/
 
 - [ ] **Step 6: Run every test file touched so far**
 
-Run: `deno test supabase/functions/`
+Run: `deno test src/`
 Expected: PASS — all suites from Tasks 1–12 green.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add supabase/functions/telegram-webhook/handlers/admin/instructions.ts supabase/functions/telegram-webhook/handlers/admin/instructions_test.ts supabase/functions/telegram-webhook/handlers/admin/menu.ts supabase/functions/telegram-webhook/handlers/admin/router.ts supabase/functions/telegram-webhook/router.ts
+git add src/telegram-webhook/handlers/admin/instructions.ts src/telegram-webhook/handlers/admin/instructions_test.ts src/telegram-webhook/handlers/admin/menu.ts src/telegram-webhook/handlers/admin/router.ts src/telegram-webhook/router.ts
 git commit -m "Add admin Инструкции editor with optional trailing-link media"
 ```
+
+---
+
+### Task 13: Admin Сотрудники and Администраторы editors (add-by-forwarded-message)
+
+Both sections add a person by capturing their Telegram id from a forwarded message rather than typed text, and both share the same list-with-🗑 visual language as Tasks 11–12 — so they share one `PeopleEditorConfig` component, parameterized like Task 11's `ListEditorConfig` but for people instead of text lines. Deleting the last remaining admin must fail visibly here, not just at the `Store` level (Task 3 already guarantees the data can't be deleted — this task proves the bot tells the human why the tap did nothing).
+
+**Files:**
+- Create: `src/telegram-webhook/handlers/admin/peopleEditor.ts`
+- Test: `src/telegram-webhook/handlers/admin/peopleEditor_test.ts`
+- Modify: `src/telegram-webhook/handlers/admin/menu.ts`
+- Modify: `src/telegram-webhook/handlers/admin/router.ts`
+- Modify: `src/telegram-webhook/router.ts`
+
+**Interfaces:**
+- Consumes: `Store`, `Employee`, `Admin` from Task 3; `TelegramMessage.forward_from` from Task 2.
+- Produces: `PEOPLE_EDITOR_CONFIGS: Record<string, PeopleEditorConfig>`; session state `"admin_people_add"` (`data: { key: "employees" | "admins" }`); callback convention `admin:people:<key>:add`, `admin:people:<key>:del:<id>`, `admin:people:<key>:done`. Nothing later in this plan depends on these — Task 14 references the admin's Telegram id (already captured here) when seeding the first real admin.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// src/telegram-webhook/handlers/admin/peopleEditor_test.ts
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { createInMemoryStore } from "../../../_shared/store.ts";
+import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
+import {
+  adminsConfig, employeesConfig, extractForwardedUser,
+  handlePeopleAddStart, handlePeopleDelete, handlePeopleDone, handlePeopleForward, openPeopleEditor,
+} from "./peopleEditor.ts";
+
+function fakeTelegram() {
+  const sent: { chatId: number; text: string; replyMarkup?: unknown }[] = [];
+  const edited: { chatId: number; messageId: number; markup: unknown }[] = [];
+  const answered: { id: string; text?: string }[] = [];
+  const client: TelegramClient = {
+    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); },
+    async sendPhoto() {},
+    async answerCallbackQuery(id, text) { answered.push({ id, text }); },
+    async editMessageReplyMarkup(chatId, messageId, markup) { edited.push({ chatId, messageId, markup }); },
+    async setWebhook() {},
+  };
+  return { client, sent, edited, answered };
+}
+
+function forwardedMsg(fromId: number, forwardFromId?: number): TelegramMessage {
+  return {
+    message_id: 1, from: { id: fromId, first_name: "RCA" }, chat: { id: fromId }, text: "переслано",
+    forward_from: forwardFromId ? { id: forwardFromId, first_name: "Мария" } : undefined,
+  };
+}
+
+function cbq(data: string): TelegramCallbackQuery {
+  return { id: "cbq", from: { id: 1, first_name: "RCA" }, message: { chat: { id: 1 }, message_id: 9 }, data };
+}
+
+Deno.test("extractForwardedUser reads the id and name off a forwarded message", () => {
+  const result = extractForwardedUser(forwardedMsg(1, 555));
+  assertEquals(result, { telegramId: 555, fullName: "Мария" });
+});
+
+Deno.test("extractForwardedUser returns null for a message that was not forwarded", () => {
+  assertEquals(extractForwardedUser(forwardedMsg(1)), null);
+});
+
+Deno.test("openPeopleEditor lists current people plus Добавить and Готово", async () => {
+  const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
+  const { client, sent } = fakeTelegram();
+
+  await openPeopleEditor(store, client, 1, employeesConfig);
+
+  const keyboard = sent[0].replyMarkup as { inline_keyboard: unknown[][] };
+  assertEquals(keyboard.inline_keyboard.length, 3); // Анна + Добавить + Готово
+});
+
+Deno.test("handlePeopleAddStart starts the forward-capture session and explains what to do", async () => {
+  const store = createInMemoryStore();
+  const { client, sent } = fakeTelegram();
+
+  await handlePeopleAddStart(store, client, cbq("admin:people:employees:add"), employeesConfig);
+
+  assertEquals(await store.getSession(1), { state: "admin_people_add", data: { key: "employees" } });
+  assertEquals(sent[0].text.includes("/start"), true);
+  assertEquals(sent[0].text.includes("администратора"), false); // this prompt is shared with employeesConfig — wording must stay generic
+});
+
+Deno.test("a non-forwarded message while adding is rejected without creating anyone", async () => {
+  const store = createInMemoryStore();
+  const { client, sent } = fakeTelegram();
+
+  await handlePeopleForward(store, client, forwardedMsg(1), employeesConfig);
+
+  assertEquals((await store.listEmployees()).length, 0);
+  assertEquals(sent[0].text.includes("не похоже на пересланное"), true);
+});
+
+Deno.test("forwarding a message adds the employee, confirms, and re-opens the list", async () => {
+  const store = createInMemoryStore();
+  const { client, sent } = fakeTelegram();
+
+  await handlePeopleForward(store, client, forwardedMsg(1, 555), employeesConfig);
+
+  const employees = await store.listEmployees();
+  assertEquals(employees[0].telegramId, 555);
+  assertEquals(employees[0].fullName, "Мария");
+  assertEquals(sent.some((m) => m.text.includes("Добавлен")), true);
+  assertEquals((await store.getSession(1)).state, null);
+});
+
+Deno.test("deleting a non-last admin succeeds and edits the keyboard", async () => {
+  const store = createInMemoryStore();
+  await store.addAdmin(1, "RCA");
+  const second = await store.addAdmin(2, "Мария");
+  const { client, edited, answered } = fakeTelegram();
+
+  await handlePeopleDelete(store, client, cbq(`admin:people:admins:del:${second.id}`), adminsConfig, second.id);
+
+  assertEquals((await store.listAdmins()).length, 1);
+  assertEquals(edited.length, 1);
+  assertEquals(answered, [{ id: "cbq", text: undefined }]);
+});
+
+Deno.test("deleting the last remaining admin fails with a clear message instead of crashing or succeeding", async () => {
+  const store = createInMemoryStore();
+  const only = await store.addAdmin(1, "RCA");
+  const { client, edited, answered } = fakeTelegram();
+
+  await handlePeopleDelete(store, client, cbq(`admin:people:admins:del:${only.id}`), adminsConfig, only.id);
+
+  assertEquals((await store.listAdmins()).length, 1);
+  assertEquals(edited.length, 0);
+  assertEquals(answered[0].text?.includes("last remaining admin"), true);
+});
+
+Deno.test("handlePeopleDone clears any lingering add-capture session", async () => {
+  const store = createInMemoryStore();
+  await store.setSession(1, "admin_people_add", { key: "admins" });
+  const { client, answered } = fakeTelegram();
+
+  await handlePeopleDone(store, client, cbq("admin:people:admins:done"));
+
+  assertEquals((await store.getSession(1)).state, null);
+  assertEquals(answered, [{ id: "cbq", text: "Сохранено." }]);
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `deno test src/telegram-webhook/handlers/admin/peopleEditor_test.ts`
+Expected: FAIL — `peopleEditor.ts` does not exist yet.
+
+- [ ] **Step 3: Implement `peopleEditor.ts`**
+
+```ts
+// src/telegram-webhook/handlers/admin/peopleEditor.ts
+import type { Store } from "../../../_shared/store.ts";
+import type { InlineKeyboard, TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
+
+export interface PeopleRow {
+  id: string;
+  label: string;
+}
+
+export interface PeopleEditorConfig {
+  key: string;
+  promptText: string;
+  listRows(store: Store): Promise<PeopleRow[]>;
+  add(store: Store, telegramId: number, fullName: string): Promise<void>;
+  remove(store: Store, id: string): Promise<void>;
+}
+
+export function extractForwardedUser(message: TelegramMessage): { telegramId: number; fullName: string } | null {
+  if (!message.forward_from) return null;
+  return { telegramId: message.forward_from.id, fullName: message.forward_from.first_name };
+}
+
+function renderPeopleKeyboard(key: string, rows: PeopleRow[]): InlineKeyboard {
+  const itemRows = rows.map((r) => [
+    { text: r.label, callback_data: "noop" },
+    { text: "🗑", callback_data: `admin:people:${key}:del:${r.id}` },
+  ]);
+  return {
+    inline_keyboard: [
+      ...itemRows,
+      [{ text: "➕ Добавить", callback_data: `admin:people:${key}:add` }],
+      [{ text: "✅ Готово", callback_data: `admin:people:${key}:done` }],
+    ],
+  };
+}
+
+export async function openPeopleEditor(
+  store: Store,
+  telegram: TelegramClient,
+  chatId: number,
+  config: PeopleEditorConfig,
+): Promise<void> {
+  const rows = await config.listRows(store);
+  await telegram.sendMessage(chatId, config.promptText, { replyMarkup: renderPeopleKeyboard(config.key, rows) });
+}
+
+export async function handlePeopleAddStart(
+  store: Store,
+  telegram: TelegramClient,
+  callbackQuery: TelegramCallbackQuery,
+  config: PeopleEditorConfig,
+): Promise<void> {
+  await store.setSession(callbackQuery.from.id, "admin_people_add", { key: config.key });
+  await telegram.answerCallbackQuery(callbackQuery.id);
+  await telegram.sendMessage(
+    callbackQuery.message.chat.id,
+    "Попросите нового человека написать боту /start, затем перешлите сюда любое его сообщение — бот возьмёт из него Telegram.",
+  );
+}
+
+export async function handlePeopleForward(
+  store: Store,
+  telegram: TelegramClient,
+  message: TelegramMessage,
+  config: PeopleEditorConfig,
+): Promise<void> {
+  const forwarded = extractForwardedUser(message);
+  if (!forwarded) {
+    await telegram.sendMessage(message.chat.id, "Это не похоже на пересланное сообщение. Перешлите сюда сообщение от нужного человека.");
+    return;
+  }
+
+  await config.add(store, forwarded.telegramId, forwarded.fullName);
+  await store.clearSession(message.from.id);
+
+  await telegram.sendMessage(message.chat.id, `Добавлен(а) ✅ ${forwarded.fullName}`);
+  await openPeopleEditor(store, telegram, message.chat.id, config);
+}
+
+export async function handlePeopleDelete(
+  store: Store,
+  telegram: TelegramClient,
+  callbackQuery: TelegramCallbackQuery,
+  config: PeopleEditorConfig,
+  id: string,
+): Promise<void> {
+  try {
+    await config.remove(store, id);
+  } catch (err) {
+    await telegram.answerCallbackQuery(callbackQuery.id, err instanceof Error ? err.message : "Не удалось удалить.");
+    return;
+  }
+
+  const rows = await config.listRows(store);
+  await telegram.editMessageReplyMarkup(
+    callbackQuery.message.chat.id,
+    callbackQuery.message.message_id,
+    renderPeopleKeyboard(config.key, rows),
+  );
+  await telegram.answerCallbackQuery(callbackQuery.id);
+}
+
+export async function handlePeopleDone(
+  store: Store,
+  telegram: TelegramClient,
+  callbackQuery: TelegramCallbackQuery,
+): Promise<void> {
+  await store.clearSession(callbackQuery.from.id);
+  await telegram.answerCallbackQuery(callbackQuery.id, "Сохранено.");
+}
+
+export const employeesConfig: PeopleEditorConfig = {
+  key: "employees",
+  promptText: "Сотрудники. Нажмите 🗑, чтобы удалить, «➕ Добавить» — чтобы подключить нового.",
+  async listRows(store) {
+    return (await store.listEmployees()).map((e) => ({ id: e.id, label: e.fullName }));
+  },
+  async add(store, telegramId, fullName) {
+    await store.addEmployee(telegramId, fullName);
+  },
+  async remove(store, id) {
+    await store.removeEmployee(id);
+  },
+};
+
+export const adminsConfig: PeopleEditorConfig = {
+  key: "admins",
+  promptText: "Администраторы. Нажмите 🗑, чтобы удалить, «➕ Добавить» — чтобы подключить нового.",
+  async listRows(store) {
+    return (await store.listAdmins()).map((a) => ({ id: a.id, label: a.fullName }));
+  },
+  async add(store, telegramId, fullName) {
+    await store.addAdmin(telegramId, fullName);
+  },
+  async remove(store, id) {
+    await store.removeAdmin(id); // throws "Cannot remove the last remaining admin" — handlePeopleDelete surfaces it
+  },
+};
+
+export const PEOPLE_EDITOR_CONFIGS: Record<string, PeopleEditorConfig> = {
+  employees: employeesConfig,
+  admins: adminsConfig,
+};
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `deno test src/telegram-webhook/handlers/admin/peopleEditor_test.ts`
+Expected: PASS (9 tests).
+
+- [ ] **Step 5: Wire Сотрудники/Администраторы into the admin menu, the admin callback router, and the top-level message router**
+
+```ts
+// src/telegram-webhook/handlers/admin/menu.ts — add the import and check PEOPLE_EDITOR_CONFIGS too
+import { PEOPLE_EDITOR_CONFIGS } from "./peopleEditor.ts";
+import { openPeopleEditor } from "./peopleEditor.ts";
+
+export async function handleAdminMenuSelect(
+  store: Store,
+  telegram: TelegramClient,
+  callbackQuery: TelegramCallbackQuery,
+  key: string,
+): Promise<void> {
+  if (key === "instructions") {
+    await openInstructionsEditor(store, telegram, callbackQuery.message.chat.id);
+    await telegram.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  const peopleConfig = PEOPLE_EDITOR_CONFIGS[key];
+  if (peopleConfig) {
+    await openPeopleEditor(store, telegram, callbackQuery.message.chat.id, peopleConfig);
+    await telegram.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  const config = LIST_EDITOR_CONFIGS[key];
+  if (config) {
+    await openListEditor(store, telegram, callbackQuery.message.chat.id, callbackQuery.from.id, config);
+    await telegram.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  await telegram.answerCallbackQuery(callbackQuery.id);
+}
+```
+
+```ts
+// src/telegram-webhook/handlers/admin/router.ts — add the import and three branches before the final fallback
+import { handlePeopleAddStart, handlePeopleDelete, handlePeopleDone, PEOPLE_EDITOR_CONFIGS } from "./peopleEditor.ts";
+
+  if (parts[1] === "people" && parts[2] && parts[3] === "add") {
+    const config = PEOPLE_EDITOR_CONFIGS[parts[2]];
+    if (config) {
+      await handlePeopleAddStart(store, telegram, callbackQuery, config);
+      return;
+    }
+  }
+  if (parts[1] === "people" && parts[2] && parts[3] === "del" && parts[4]) {
+    const config = PEOPLE_EDITOR_CONFIGS[parts[2]];
+    if (config) {
+      await handlePeopleDelete(store, telegram, callbackQuery, config, parts[4]);
+      return;
+    }
+  }
+  if (parts[1] === "people" && parts[2] && parts[3] === "done") {
+    await handlePeopleDone(store, telegram, callbackQuery);
+    return;
+  }
+```
+
+```ts
+// src/telegram-webhook/router.ts — add this session-state branch and its imports
+import { handlePeopleForward, PEOPLE_EDITOR_CONFIGS } from "./handlers/admin/peopleEditor.ts";
+
+  if (session.state === "admin_people_add") {
+    const admin = await store.getAdminByTelegramId(message.from.id);
+    const config = admin ? PEOPLE_EDITOR_CONFIGS[session.data.key as string] : undefined;
+    if (config) await handlePeopleForward(store, telegram, message, config);
+    return;
+  }
+```
+
+- [ ] **Step 6: Run every test file touched so far**
+
+Run: `deno test src/`
+Expected: PASS — all suites from Tasks 1–13 green.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/telegram-webhook/handlers/admin/peopleEditor.ts src/telegram-webhook/handlers/admin/peopleEditor_test.ts src/telegram-webhook/handlers/admin/menu.ts src/telegram-webhook/handlers/admin/router.ts src/telegram-webhook/router.ts
+git commit -m "Add admin Сотрудники and Администраторы editors via forwarded messages"
+```
+
+---
+
+### Task 14: Deployment to Cloudflare and go-live
+
+Everything up to here has run under Deno against `createInMemoryStore()`. This task adds the npm/TypeScript toolchain `wrangler` actually needs, deploys the Worker for real, and solves the one bootstrap problem the design has: the very first admin can't use `/admin` to add themself, because `/admin` only works for people who are already admins.
+
+**Files:**
+- Create: `package.json`
+- Create: `tsconfig.json`
+- Modify: `wrangler.toml` (no new content expected — this step just confirms Tasks 1/4/9 left it complete)
+
+- [ ] **Step 1: Scaffold the npm/TypeScript toolchain**
+
+Run:
+```bash
+npm init -y
+npm install -D wrangler typescript @cloudflare/workers-types
+```
+
+Edit the generated `package.json` to add two convenience scripts:
+
+```json
+{
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  }
+}
+```
+
+- [ ] **Step 2: Write `tsconfig.json`**
+
+```json
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2022"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"]
+}
+```
+
+- [ ] **Step 3: Confirm `wrangler.toml` is complete**
+
+By this point Tasks 1, 4, and 9 have already built it up piece by piece. Open it and confirm it has all four pieces — if any are missing, add them now:
+
+```toml
+name = "smena-bot"
+compatibility_date = "2026-09-25"
+main = "src/worker.ts"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "smena-bot-db"
+database_id = "<the id from Task 1's `wrangler d1 create`>"
+
+[triggers]
+crons = ["*/5 * * * *"]
+```
+
+- [ ] **Step 4: Run the full test suite one last time before touching production**
+
+Run: `deno test src/`
+Expected: PASS — every suite from Tasks 1–13.
+
+- [ ] **Step 5: Apply the migration to the real (remote) D1 database**
+
+Run: `npx wrangler d1 execute smena-bot-db --remote --file=migrations/0001_init.sql`
+Expected: `Executed N queries` — this is the same file Task 1 already applied `--local`, now applied to the database Cloudflare actually serves in production.
+
+- [ ] **Step 6: Set the two secrets**
+
+Run:
+```bash
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+# paste the token from @BotFather when prompted
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+# paste any random string you generate yourself, e.g. `openssl rand -hex 32`
+```
+Expected: both commands confirm `Success! Uploaded secret <name>`.
+
+- [ ] **Step 7: Deploy the Worker**
+
+Run: `npx wrangler deploy`
+Expected: output ends with a `https://smena-bot.<your-subdomain>.workers.dev` URL — copy it, it's needed in the next step.
+
+- [ ] **Step 8: Register the Telegram webhook**
+
+Run (substituting the bot token and the URL from Step 7, and the exact same secret value used in Step 6):
+```bash
+curl -s -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://smena-bot.<your-subdomain>.workers.dev", "secret_token": "<the TELEGRAM_WEBHOOK_SECRET value>"}'
+```
+Expected: `{"ok":true,"result":true,"description":"Webhook was set"}`.
+
+- [ ] **Step 9: Bootstrap the first admin**
+
+`/admin` only works for people already in the `admins` table, so the very first one has to be inserted directly rather than through the bot. Get the client's numeric Telegram id (have them message any id-lookup bot such as @userinfobot, or message your own bot and read their id from `npx wrangler tail` while they do), then run:
+
+```bash
+npx wrangler d1 execute smena-bot-db --remote --command "insert into admins (id, telegram_id, full_name) values ('$(node -e "console.log(crypto.randomUUID())")', <THEIR_TELEGRAM_ID>, '<Their Name>');"
+```
+
+Expected: `1 row(s) written`. From this point on, this admin can add every other admin themselves via `/admin → 🛡️ Администраторы`, following Task 13's forward-a-message flow — no more manual SQL is ever needed.
+
+- [ ] **Step 10: Smoke-test the live bot**
+
+From the bootstrapped admin's Telegram account: send `/start` (expect the shift panel or, since they aren't also an employee, the "Используйте /admin" message), then send `/admin` and confirm all six sections open and their 🗑/➕/✅ buttons respond. Add yourself as a test employee (`/admin → 🧑‍🍳 Сотрудники → ➕ Добавить`, forwarding a message from a second Telegram account you control), then from that second account walk through OPEN → checklist → cash amount → CLOSER → checklist → closing float amount, confirming the admin account receives every notification described in the spec (open, discrepancy warning if you deliberately mismatch the numbers, close with photo).
+
+- [ ] **Step 11: Verify the cron trigger fires**
+
+Run: `npx wrangler tail` and leave it open for a few minutes.
+Expected: a log line appears roughly every 5 minutes for the `scheduled` invocation, with no thrown errors. (Reminders/lateness notices themselves only fire near the venue's actual opening/closing times and 14:20 — the absence of a message during the smoke test is expected outside those windows; the log line proving `scheduled` ran on schedule is what this step checks.)
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add package.json package-lock.json tsconfig.json wrangler.toml
+git commit -m "Add Cloudflare deployment toolchain and finalize wrangler.toml"
+```
+
+At this point the bot is live. The three items in the spec's §7 (employee list, venue name, write-off link) can be filled in by the bootstrapped admin at any time through `/admin`, with no further developer involvement — which was the whole point.
