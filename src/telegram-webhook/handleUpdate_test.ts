@@ -66,3 +66,18 @@ Deno.test("the OPEN button is routed to the open-shift handler, not the fallback
 
   assertEquals(sent.some((m) => m.text.includes("Не понимаю")), false);
 });
+
+Deno.test("a non-admin tapping an admin: callback is silently rejected, no menu leaks", async () => {
+  const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна"); // registered, but not an admin
+  const { client, sent, answered } = fakeTelegram();
+  const update: TelegramUpdate = {
+    update_id: 5,
+    callback_query: { id: "cbq", from: { id: 1, first_name: "Анна" }, message: { chat: { id: 1 }, message_id: 1 }, data: "admin:menu:expiry" },
+  };
+
+  await handleUpdate(store, client, update);
+
+  assertEquals(sent.length, 0);
+  assertEquals(answered, [{ id: "cbq", text: undefined }]);
+});

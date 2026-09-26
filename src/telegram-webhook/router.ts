@@ -1,11 +1,15 @@
 import type { Store } from "../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../_shared/telegram.ts";
+import { UNKNOWN_COMMAND_TEXT } from "./messages.ts";
 import { handleStart } from "./handlers/start.ts";
 import { handleOpenButton, handleOpenCashAmount } from "./handlers/open.ts";
 import { handleCloserButton, handleClosePhoto, handleClosingFloatAmount } from "./handlers/close.ts";
 import { handleXreportButton, handleXreportCash, handleXreportCashless } from "./handlers/xreport.ts";
 import { handleInstructionsMenu } from "./handlers/instructions.ts";
 import { handleExpiryList } from "./handlers/expiry.ts";
+import { handleAdminEntry } from "./handlers/admin/entry.ts";
+import { handleListEditorAddText } from "./handlers/admin/listEditor.ts";
+import { LIST_EDITOR_CONFIGS } from "./handlers/admin/listEditorConfigs.ts";
 
 export async function handleMessage(
   store: Store,
@@ -34,6 +38,12 @@ export async function handleMessage(
     await handleXreportCashless(store, telegram, message, session.data.shiftId as string, session.data.cash as number);
     return;
   }
+  if (session.state === "admin_list_add") {
+    const admin = await store.getAdminByTelegramId(message.from.id);
+    const config = admin ? LIST_EDITOR_CONFIGS[session.data.key as string] : undefined;
+    if (config) await handleListEditorAddText(store, telegram, message, config);
+    return;
+  }
 
   if (message.text === "/start") {
     await handleStart(store, telegram, message);
@@ -59,6 +69,10 @@ export async function handleMessage(
     await handleExpiryList(store, telegram, message);
     return;
   }
+  if (message.text === "/admin") {
+    await handleAdminEntry(store, telegram, message);
+    return;
+  }
 
-  await telegram.sendMessage(message.chat.id, "Не понимаю эту команду. Используйте кнопки внизу экрана.");
+  await telegram.sendMessage(message.chat.id, UNKNOWN_COMMAND_TEXT);
 }

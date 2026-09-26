@@ -4,6 +4,7 @@ import { handleOpenChecklistToggle } from "./handlers/open.ts";
 import { handleCloseChecklistToggle } from "./handlers/close.ts";
 import { handleXreportStartCallback } from "./handlers/xreport.ts";
 import { handleInstructionShow } from "./handlers/instructions.ts";
+import { routeAdminCallback } from "./handlers/admin/router.ts";
 
 export async function handleCallbackQuery(
   store: Store,
@@ -26,6 +27,15 @@ export async function handleCallbackQuery(
   }
   if (kind === "instr" && phase === "show" && itemId) {
     await handleInstructionShow(store, telegram, callbackQuery, itemId);
+    return;
+  }
+  if (callbackQuery.data.startsWith("admin:")) {
+    const admin = await store.getAdminByTelegramId(callbackQuery.from.id);
+    if (!admin) {
+      await telegram.answerCallbackQuery(callbackQuery.id);
+      return;
+    }
+    await routeAdminCallback(store, telegram, callbackQuery);
     return;
   }
 
