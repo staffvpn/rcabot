@@ -6,3 +6,6 @@ main = "src/worker.ts"
 binding = "DB"
 database_name = "smena-bot-db"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+[triggers]
+crons = ["*/5 * * * *"]
