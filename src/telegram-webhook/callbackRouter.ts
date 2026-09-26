@@ -1,6 +1,7 @@
 import type { Store } from "../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient } from "../_shared/telegram.ts";
 import { handleOpenChecklistToggle } from "./handlers/open.ts";
+import { handleCloseChecklistToggle } from "./handlers/close.ts";
 
 export async function handleCallbackQuery(
   store: Store,
@@ -11,6 +12,10 @@ export async function handleCallbackQuery(
 
   if (kind === "chk" && phase === "open" && itemId) {
     await handleOpenChecklistToggle(store, telegram, callbackQuery, itemId);
+    return;
+  }
+  if (kind === "chk" && phase === "close" && itemId) {
+    await handleCloseChecklistToggle(store, telegram, callbackQuery, itemId);
     return;
   }
 

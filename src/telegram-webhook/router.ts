@@ -2,6 +2,7 @@ import type { Store } from "../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../_shared/telegram.ts";
 import { handleStart } from "./handlers/start.ts";
 import { handleOpenButton, handleOpenCashAmount } from "./handlers/open.ts";
+import { handleCloserButton, handleClosePhoto, handleClosingFloatAmount } from "./handlers/close.ts";
 
 export async function handleMessage(
   store: Store,
@@ -14,14 +15,25 @@ export async function handleMessage(
     await handleOpenCashAmount(store, telegram, message, session.data.shiftId as string);
     return;
   }
+  if (session.state === "awaiting_close_photo") {
+    await handleClosePhoto(store, telegram, message);
+    return;
+  }
+  if (session.state === "awaiting_closing_float") {
+    await handleClosingFloatAmount(store, telegram, message, session.data.shiftId as string);
+    return;
+  }
 
   if (message.text === "/start") {
     await handleStart(store, telegram, message);
     return;
   }
-
   if (message.text === "🟢 OPEN") {
     await handleOpenButton(store, telegram, message);
+    return;
+  }
+  if (message.text === "🔴 CLOSER") {
+    await handleCloserButton(store, telegram, message);
     return;
   }
 
