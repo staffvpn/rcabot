@@ -1,5 +1,6 @@
 name = "smena-bot"
 compatibility_date = "2026-09-25"
+main = "src/worker.ts"
 
 [[d1_databases]]
 binding = "DB"
