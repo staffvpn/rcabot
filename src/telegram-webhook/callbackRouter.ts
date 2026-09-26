@@ -3,6 +3,7 @@ import type { TelegramCallbackQuery, TelegramClient } from "../_shared/telegram.
 import { handleOpenChecklistToggle } from "./handlers/open.ts";
 import { handleCloseChecklistToggle } from "./handlers/close.ts";
 import { handleXreportStartCallback } from "./handlers/xreport.ts";
+import { handleInstructionShow } from "./handlers/instructions.ts";
 
 export async function handleCallbackQuery(
   store: Store,
@@ -21,6 +22,10 @@ export async function handleCallbackQuery(
   }
   if (callbackQuery.data === "xreport:start") {
     await handleXreportStartCallback(store, telegram, callbackQuery);
+    return;
+  }
+  if (kind === "instr" && phase === "show" && itemId) {
+    await handleInstructionShow(store, telegram, callbackQuery, itemId);
     return;
   }
 

@@ -4,6 +4,8 @@ import { handleStart } from "./handlers/start.ts";
 import { handleOpenButton, handleOpenCashAmount } from "./handlers/open.ts";
 import { handleCloserButton, handleClosePhoto, handleClosingFloatAmount } from "./handlers/close.ts";
 import { handleXreportButton, handleXreportCash, handleXreportCashless } from "./handlers/xreport.ts";
+import { handleInstructionsMenu } from "./handlers/instructions.ts";
+import { handleExpiryList } from "./handlers/expiry.ts";
 
 export async function handleMessage(
   store: Store,
@@ -47,6 +49,14 @@ export async function handleMessage(
   }
   if (message.text === "🧾 Контрольный X-отчёт") {
     await handleXreportButton(store, telegram, message);
+    return;
+  }
+  if (message.text === "📖 Инструкции") {
+    await handleInstructionsMenu(store, telegram, message);
+    return;
+  }
+  if (message.text === "🍰 Сроки годности") {
+    await handleExpiryList(store, telegram, message);
     return;
   }
 
