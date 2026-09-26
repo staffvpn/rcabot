@@ -19,3 +19,8 @@ export function todayDateKey(now: Date = new Date()): string {
 export function todayWeekday(now: Date = new Date()): number {
   return weekdayInTimezone(now, VENUE_TZ_OFFSET_MINUTES);
 }
+
+export function formatVenueTime(iso: string): string {
+  const shifted = new Date(new Date(iso).getTime() + VENUE_TZ_OFFSET_MINUTES * 60_000);
+  return shifted.toISOString().slice(11, 16);
+}

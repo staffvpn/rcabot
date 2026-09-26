@@ -52,3 +52,17 @@ Deno.test("an update with neither message nor callback_query is a no-op", async 
   assertEquals(sent.length, 0);
   assertEquals(answered.length, 0);
 });
+
+Deno.test("the OPEN button is routed to the open-shift handler, not the fallback reply", async () => {
+  const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
+  const { client, sent } = fakeTelegram();
+  const update: TelegramUpdate = {
+    update_id: 4,
+    message: { message_id: 1, from: { id: 1, first_name: "Анна" }, chat: { id: 1 }, text: "🟢 OPEN" },
+  };
+
+  await handleUpdate(store, client, update);
+
+  assertEquals(sent.some((m) => m.text.includes("Не понимаю")), false);
+});
