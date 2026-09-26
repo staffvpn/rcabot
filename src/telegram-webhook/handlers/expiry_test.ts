@@ -25,7 +25,7 @@ Deno.test("an empty expiry list says so instead of sending a blank list", async 
   assertEquals(sent, [{ chatId: 1, text: "Список сроков годности пока пуст." }]);
 });
 
-Deno.test("the expiry list is formatted as one 'name — N суток' line per item, in position order", async () => {
+Deno.test("the expiry list is formatted as one 'name — N суток' line per item, in position order, with the supplier reference link appended", async () => {
   const store = createInMemoryStore();
   await store.addExpiryItem("Канеле", 2);
   await store.addExpiryItem("Чизкейк", 3);
@@ -33,5 +33,8 @@ Deno.test("the expiry list is formatted as one 'name — N суток' line per 
 
   await handleExpiryList(store, client, msg());
 
-  assertEquals(sent, [{ chatId: 1, text: "СРОКИ ГОДНОСТИ\nКанеле — 2 суток\nЧизкейк — 3 суток" }]);
+  assertEquals(sent, [{
+    chatId: 1,
+    text: "СРОКИ ГОДНОСТИ\nКанеле — 2 суток\nЧизкейк — 3 суток\n\n🔗 Полный ассортимент: https://www.zhirnova.net",
+  }]);
 });

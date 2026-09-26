@@ -12,5 +12,8 @@ export async function handleExpiryList(
     return;
   }
   const lines = items.map((i) => `${i.name} — ${i.shelfLifeDays} суток`);
-  await telegram.sendMessage(message.chat.id, `СРОКИ ГОДНОСТИ\n${lines.join("\n")}`);
+  await telegram.sendMessage(
+    message.chat.id,
+    `СРОКИ ГОДНОСТИ\n${lines.join("\n")}\n\n🔗 Полный ассортимент: https://www.zhirnova.net`,
+  );
 }
