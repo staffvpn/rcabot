@@ -1,0 +1,7 @@
+name = "smena-bot"
+compatibility_date = "2026-09-25"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "smena-bot-db"
+database_id = "00000000-0000-0000-0000-000000000000"
