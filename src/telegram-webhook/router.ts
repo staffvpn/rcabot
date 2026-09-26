@@ -11,6 +11,7 @@ import { handleAdminEntry } from "./handlers/admin/entry.ts";
 import { handleListEditorAddText } from "./handlers/admin/listEditor.ts";
 import { LIST_EDITOR_CONFIGS } from "./handlers/admin/listEditorConfigs.ts";
 import { handleInstructionBody, handleInstructionTitle } from "./handlers/admin/instructions.ts";
+import { handlePeopleForward, PEOPLE_EDITOR_CONFIGS } from "./handlers/admin/peopleEditor.ts";
 
 export async function handleMessage(
   store: Store,
@@ -55,6 +56,12 @@ export async function handleMessage(
     if (await store.getAdminByTelegramId(message.from.id)) {
       await handleInstructionBody(store, telegram, message, session.data.title as string);
     }
+    return;
+  }
+  if (session.state === "admin_people_add") {
+    const admin = await store.getAdminByTelegramId(message.from.id);
+    const config = admin ? PEOPLE_EDITOR_CONFIGS[session.data.key as string] : undefined;
+    if (config) await handlePeopleForward(store, telegram, message, config);
     return;
   }
 

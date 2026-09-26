@@ -4,6 +4,7 @@ import { handleAdminMenuSelect } from "./menu.ts";
 import { handleListEditorDelete, handleListEditorDone } from "./listEditor.ts";
 import { LIST_EDITOR_CONFIGS } from "./listEditorConfigs.ts";
 import { handleInstructionsAddStart, handleInstructionsDelete, handleInstructionsDone } from "./instructions.ts";
+import { handlePeopleAddStart, handlePeopleDelete, handlePeopleDone, PEOPLE_EDITOR_CONFIGS } from "./peopleEditor.ts";
 
 export async function routeAdminCallback(
   store: Store,
@@ -40,6 +41,25 @@ export async function routeAdminCallback(
   }
   if (parts[1] === "instr" && parts[2] === "done") {
     await handleInstructionsDone(store, telegram, callbackQuery);
+    return;
+  }
+
+  if (parts[1] === "people" && parts[2] && parts[3] === "add") {
+    const config = PEOPLE_EDITOR_CONFIGS[parts[2]];
+    if (config) {
+      await handlePeopleAddStart(store, telegram, callbackQuery, config);
+      return;
+    }
+  }
+  if (parts[1] === "people" && parts[2] && parts[3] === "del" && parts[4]) {
+    const config = PEOPLE_EDITOR_CONFIGS[parts[2]];
+    if (config) {
+      await handlePeopleDelete(store, telegram, callbackQuery, config, parts[4]);
+      return;
+    }
+  }
+  if (parts[1] === "people" && parts[2] && parts[3] === "done") {
+    await handlePeopleDone(store, telegram, callbackQuery);
     return;
   }
 
