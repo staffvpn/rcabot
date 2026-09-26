@@ -10,6 +10,7 @@ import { handleExpiryList } from "./handlers/expiry.ts";
 import { handleAdminEntry } from "./handlers/admin/entry.ts";
 import { handleListEditorAddText } from "./handlers/admin/listEditor.ts";
 import { LIST_EDITOR_CONFIGS } from "./handlers/admin/listEditorConfigs.ts";
+import { handleInstructionBody, handleInstructionTitle } from "./handlers/admin/instructions.ts";
 
 export async function handleMessage(
   store: Store,
@@ -42,6 +43,18 @@ export async function handleMessage(
     const admin = await store.getAdminByTelegramId(message.from.id);
     const config = admin ? LIST_EDITOR_CONFIGS[session.data.key as string] : undefined;
     if (config) await handleListEditorAddText(store, telegram, message, config);
+    return;
+  }
+  if (session.state === "admin_instruction_title") {
+    if (await store.getAdminByTelegramId(message.from.id)) {
+      await handleInstructionTitle(store, telegram, message);
+    }
+    return;
+  }
+  if (session.state === "admin_instruction_body") {
+    if (await store.getAdminByTelegramId(message.from.id)) {
+      await handleInstructionBody(store, telegram, message, session.data.title as string);
+    }
     return;
   }
 

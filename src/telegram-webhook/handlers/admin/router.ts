@@ -3,6 +3,7 @@ import type { TelegramCallbackQuery, TelegramClient } from "../../../_shared/tel
 import { handleAdminMenuSelect } from "./menu.ts";
 import { handleListEditorDelete, handleListEditorDone } from "./listEditor.ts";
 import { LIST_EDITOR_CONFIGS } from "./listEditorConfigs.ts";
+import { handleInstructionsAddStart, handleInstructionsDelete, handleInstructionsDone } from "./instructions.ts";
 
 export async function routeAdminCallback(
   store: Store,
@@ -26,6 +27,19 @@ export async function routeAdminCallback(
 
   if (parts[1] === "list" && parts[2] && parts[3] === "done") {
     await handleListEditorDone(store, telegram, callbackQuery);
+    return;
+  }
+
+  if (parts[1] === "instr" && parts[2] === "add") {
+    await handleInstructionsAddStart(store, telegram, callbackQuery);
+    return;
+  }
+  if (parts[1] === "instr" && parts[2] === "del" && parts[3]) {
+    await handleInstructionsDelete(store, telegram, callbackQuery, parts[3]);
+    return;
+  }
+  if (parts[1] === "instr" && parts[2] === "done") {
+    await handleInstructionsDone(store, telegram, callbackQuery);
     return;
   }
 

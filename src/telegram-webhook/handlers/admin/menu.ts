@@ -2,6 +2,7 @@ import type { Store } from "../../../_shared/store.ts";
 import type { InlineKeyboard, TelegramCallbackQuery, TelegramClient } from "../../../_shared/telegram.ts";
 import { openListEditor } from "./listEditor.ts";
 import { LIST_EDITOR_CONFIGS } from "./listEditorConfigs.ts";
+import { openInstructionsEditor } from "./instructions.ts";
 
 export function renderAdminMenuKeyboard(): InlineKeyboard {
   return {
@@ -22,6 +23,11 @@ export async function handleAdminMenuSelect(
   callbackQuery: TelegramCallbackQuery,
   key: string,
 ): Promise<void> {
+  if (key === "instructions") {
+    await openInstructionsEditor(store, telegram, callbackQuery.message.chat.id);
+    await telegram.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
   const config = LIST_EDITOR_CONFIGS[key];
   if (config) {
     await openListEditor(store, telegram, callbackQuery.message.chat.id, callbackQuery.from.id, config);

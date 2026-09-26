@@ -30,13 +30,13 @@ Deno.test("admin:menu:expiry opens the expiry list editor", async () => {
   assertEquals(sent[0].text.includes("сроков годности"), true);
 });
 
-Deno.test("admin:menu:instructions does not crash before Task 12 wires it — it just answers the callback", async () => {
+Deno.test("admin:menu:instructions opens the instructions editor", async () => {
   const store = createInMemoryStore();
   const { client, sent, answered } = fakeTelegram();
 
   await routeAdminCallback(store, client, cbq("admin:menu:instructions"));
 
-  assertEquals(sent.length, 0);
+  assertEquals(sent[0].text, "Разделы инструкций:");
   assertEquals(answered.length, 1);
 });
 
