@@ -5,7 +5,7 @@ main = "src/worker.ts"
 [[d1_databases]]
 binding = "DB"
 database_name = "smena-bot-db"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "9a06a75e-4ccc-48e1-90c9-7dbafd6b6987"
 
 [triggers]
 crons = ["*/5 * * * *"]
