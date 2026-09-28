@@ -52,6 +52,15 @@ Deno.test("addAdmin is idempotent by telegram id: re-adding the same person does
   assertEquals((await store.listAdmins()).length, 1);
 });
 
+Deno.test("addInstruction defaults to a top-level article, and an explicit parentId round-trips", async () => {
+  const store = createInMemoryStore();
+  const parent = await store.addInstruction("Информация по смене", "Выберите раздел ниже.", null);
+  assertEquals(parent.parentId, null);
+
+  const child = await store.addInstruction("Открытие смены", "1. ...", null, parent.id);
+  assertEquals(child.parentId, parent.id);
+});
+
 Deno.test("removeAdmin refuses to delete the last remaining admin", async () => {
   const store = createInMemoryStore();
   const admin = await store.addAdmin(1, "RCA");

@@ -33,6 +33,7 @@ export interface InstructionArticle {
   title: string;
   body: string;
   mediaUrl: string | null;
+  parentId: string | null;
 }
 
 export interface ExpiryItem {
@@ -93,7 +94,8 @@ export interface Store {
   removeChecklistItem(id: string): Promise<void>;
 
   listInstructions(): Promise<InstructionArticle[]>;
-  addInstruction(title: string, body: string, mediaUrl: string | null): Promise<InstructionArticle>;
+  /** parentId nests this article as a sub-section, shown only when its parent is opened. Not exposed via any admin flow — seeded by migration only. */
+  addInstruction(title: string, body: string, mediaUrl: string | null, parentId?: string | null): Promise<InstructionArticle>;
   removeInstruction(id: string): Promise<void>;
 
   listExpiryItems(): Promise<ExpiryItem[]>;
@@ -231,13 +233,14 @@ export function createInMemoryStore(): Store {
     async listInstructions() {
       return [...instructions.values()].sort((a, b) => a.position - b.position);
     },
-    async addInstruction(title, body, mediaUrl) {
+    async addInstruction(title, body, mediaUrl, parentId = null) {
       const article: InstructionArticle = {
         id: makeId(),
         position: instructions.size + 1,
         title,
         body,
         mediaUrl,
+        parentId,
       };
       instructions.set(article.id, article);
       return article;

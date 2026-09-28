@@ -20,7 +20,10 @@ function toChecklistItem(row: Record<string, unknown>): ChecklistItem {
   };
 }
 function toInstruction(row: Record<string, unknown>): InstructionArticle {
-  return { id: row.id as string, position: row.position as number, title: row.title as string, body: row.body as string, mediaUrl: (row.media_url as string) ?? null };
+  return {
+    id: row.id as string, position: row.position as number, title: row.title as string, body: row.body as string,
+    mediaUrl: (row.media_url as string) ?? null, parentId: (row.parent_id as string) ?? null,
+  };
 }
 function toExpiryItem(row: Record<string, unknown>): ExpiryItem {
   return { id: row.id as string, position: row.position as number, name: row.name as string, shelfLifeDays: row.shelf_life_days as number };
@@ -134,15 +137,15 @@ export function createD1Store(db: D1Database): Store {
     async listInstructions() {
       return (await all("select * from instructions order by position")).map(toInstruction);
     },
-    async addInstruction(title, body, mediaUrl) {
+    async addInstruction(title, body, mediaUrl, parentId = null) {
       const existing = await this.listInstructions();
       const id = makeId();
       const position = existing.length + 1;
       await run(
-        "insert into instructions (id, position, title, body, media_url) values (?, ?, ?, ?, ?)",
-        id, position, title, body, mediaUrl,
+        "insert into instructions (id, position, title, body, media_url, parent_id) values (?, ?, ?, ?, ?, ?)",
+        id, position, title, body, mediaUrl, parentId,
       );
-      return { id, position, title, body, mediaUrl };
+      return { id, position, title, body, mediaUrl, parentId };
     },
     async removeInstruction(id) {
       await run("delete from instructions where id = ?", id);

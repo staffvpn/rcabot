@@ -38,6 +38,18 @@ Deno.test("an empty instructions list still shows Добавить and Гото�
   assertEquals(keyboard.inline_keyboard.length, 2);
 });
 
+Deno.test("the editor list shows only top-level articles — sub-sections are not manageable here", async () => {
+  const store = createInMemoryStore();
+  const parent = await store.addInstruction("Информация по смене", "Выберите раздел ниже.", null);
+  await store.addInstruction("Открытие смены", "1. ...", null, parent.id);
+  const { client, sent } = fakeTelegram();
+
+  await openInstructionsEditor(store, client, 1);
+
+  const keyboard = sent[0].replyMarkup as { inline_keyboard: unknown[][] };
+  assertEquals(keyboard.inline_keyboard.length, 3); // parent + Добавить + Готово
+});
+
 Deno.test("handleInstructionsAddStart starts the title-capture session and prompts for it", async () => {
   const store = createInMemoryStore();
   const { client, sent, answered } = fakeTelegram();

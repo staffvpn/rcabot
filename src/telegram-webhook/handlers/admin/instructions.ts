@@ -16,7 +16,9 @@ function renderInstructionsKeyboard(rows: { id: string; title: string }[]): Inli
 }
 
 export async function openInstructionsEditor(store: Store, telegram: TelegramClient, chatId: number): Promise<void> {
-  const articles = await store.listInstructions();
+  // Sub-sections (parentId set) aren't manageable here — this flat editor has no notion of
+  // nesting, so they stay hidden to avoid confusing the admin with rows it can't organize.
+  const articles = (await store.listInstructions()).filter((a) => a.parentId === null);
   await telegram.sendMessage(chatId, "Разделы инструкций:", {
     replyMarkup: renderInstructionsKeyboard(articles.map((a) => ({ id: a.id, title: a.title }))),
   });
@@ -84,7 +86,7 @@ export async function handleInstructionsDelete(
   id: string,
 ): Promise<void> {
   await store.removeInstruction(id);
-  const articles = await store.listInstructions();
+  const articles = (await store.listInstructions()).filter((a) => a.parentId === null);
   await telegram.editMessageReplyMarkup(
     callbackQuery.message.chat.id,
     callbackQuery.message.message_id,

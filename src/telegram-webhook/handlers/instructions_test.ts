@@ -45,6 +45,52 @@ Deno.test("the instructions menu lists one button per article", async () => {
   });
 });
 
+Deno.test("the instructions menu does not list sub-section articles — only their parent shows at the top level", async () => {
+  const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
+  const parent = await store.addInstruction("Информация по смене", "Выберите раздел ниже.", null);
+  await store.addInstruction("Открытие смены", "1. Откройте Настройки...", null, parent.id);
+  const { client, sent } = fakeTelegram();
+
+  await handleInstructionsMenu(store, client, { message_id: 1, from: { id: 1, first_name: "Анна" }, chat: { id: 1 }, text: "📖 Инструкции" });
+
+  assertEquals(sent[0].replyMarkup, {
+    inline_keyboard: [[{ text: "Информация по смене", callback_data: `instr:show:${parent.id}` }]],
+  });
+});
+
+Deno.test("opening a top-level article that has sub-sections shows a submenu instead of its body", async () => {
+  const store = createInMemoryStore();
+  const parent = await store.addInstruction("Информация по смене", "Выберите раздел ниже.", null);
+  const child1 = await store.addInstruction("Открытие смены", "1. Откройте Настройки...", null, parent.id);
+  const child2 = await store.addInstruction("Инкассация", "1. Настройки → Кассовые смены...", null, parent.id);
+  const { client, sent } = fakeTelegram();
+  const cbq: TelegramCallbackQuery = { id: "cbq", from: { id: 1, first_name: "Анна" }, message: { chat: { id: 1 }, message_id: 5 }, data: `instr:show:${parent.id}` };
+
+  await handleInstructionShow(store, client, cbq, parent.id);
+
+  assertEquals(sent, [{
+    chatId: 1,
+    text: "Выберите раздел:",
+    replyMarkup: { inline_keyboard: [
+      [{ text: "Открытие смены", callback_data: `instr:show:${child1.id}` }],
+      [{ text: "Инкассация", callback_data: `instr:show:${child2.id}` }],
+    ] },
+  }]);
+});
+
+Deno.test("opening a sub-section article shows its own body, same as any leaf article", async () => {
+  const store = createInMemoryStore();
+  const parent = await store.addInstruction("Информация по смене", "Выберите раздел ниже.", null);
+  const child = await store.addInstruction("Открытие смены", "1. Откройте Настройки...", null, parent.id);
+  const { client, sent } = fakeTelegram();
+  const cbq: TelegramCallbackQuery = { id: "cbq", from: { id: 1, first_name: "Анна" }, message: { chat: { id: 1 }, message_id: 5 }, data: `instr:show:${child.id}` };
+
+  await handleInstructionShow(store, client, cbq, child.id);
+
+  assertEquals(sent, [{ chatId: 1, text: "ОТКРЫТИЕ СМЕНЫ\n1. Откройте Настройки...", replyMarkup: undefined }]);
+});
+
 Deno.test("showing an article with no media prints just the title and body", async () => {
   const store = createInMemoryStore();
   const article = await store.addInstruction("Списания", "Причины списания...", null);
