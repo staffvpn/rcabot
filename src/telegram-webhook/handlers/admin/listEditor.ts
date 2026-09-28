@@ -1,5 +1,6 @@
 import type { Store } from "../../../_shared/store.ts";
 import type { InlineKeyboard, TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
+import { clearEphemeral, sendEphemeral } from "../../ephemeral.ts";
 
 export interface ListEditorRow {
   id: string;
@@ -34,7 +35,9 @@ export async function openListEditor(
 ): Promise<void> {
   await store.setSession(telegramId, "admin_list_add", { key: config.key });
   const rows = await config.listRows(store);
-  await telegram.sendMessage(chatId, config.promptText, { replyMarkup: renderListEditorKeyboard(config.key, rows) });
+  await sendEphemeral(store, telegram, telegramId, chatId, config.promptText, {
+    replyMarkup: renderListEditorKeyboard(config.key, rows),
+  });
 }
 
 export async function handleListEditorAddText(
@@ -45,11 +48,13 @@ export async function handleListEditorAddText(
 ): Promise<void> {
   const result = await config.addFromText(store, message.text ?? "");
   if (!result.ok) {
-    await telegram.sendMessage(message.chat.id, result.error);
+    await sendEphemeral(store, telegram, message.from.id, message.chat.id, result.error);
     return;
   }
   const rows = await config.listRows(store);
-  await telegram.sendMessage(message.chat.id, "Добавлено ✅", { replyMarkup: renderListEditorKeyboard(config.key, rows) });
+  await sendEphemeral(store, telegram, message.from.id, message.chat.id, "Добавлено ✅", {
+    replyMarkup: renderListEditorKeyboard(config.key, rows),
+  });
 }
 
 export async function handleListEditorDelete(
@@ -82,5 +87,6 @@ export async function handleListEditorDone(
   callbackQuery: TelegramCallbackQuery,
 ): Promise<void> {
   await store.clearSession(callbackQuery.from.id);
+  await clearEphemeral(store, telegram, callbackQuery.from.id);
   await telegram.answerCallbackQuery(callbackQuery.id, "Сохранено.");
 }

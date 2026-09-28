@@ -1,5 +1,6 @@
 import type { Store } from "../../../_shared/store.ts";
 import type { InlineKeyboard, TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
+import { clearEphemeral, sendEphemeral } from "../../ephemeral.ts";
 
 function renderInstructionsKeyboard(rows: { id: string; title: string }[]): InlineKeyboard {
   const itemRows = rows.map((r) => [
@@ -15,11 +16,16 @@ function renderInstructionsKeyboard(rows: { id: string; title: string }[]): Inli
   };
 }
 
-export async function openInstructionsEditor(store: Store, telegram: TelegramClient, chatId: number): Promise<void> {
+export async function openInstructionsEditor(
+  store: Store,
+  telegram: TelegramClient,
+  chatId: number,
+  telegramId: number,
+): Promise<void> {
   // Sub-sections (parentId set) aren't manageable here — this flat editor has no notion of
   // nesting, so they stay hidden to avoid confusing the admin with rows it can't organize.
   const articles = (await store.listInstructions()).filter((a) => a.parentId === null);
-  await telegram.sendMessage(chatId, "Разделы инструкций:", {
+  await sendEphemeral(store, telegram, telegramId, chatId, "Разделы инструкций:", {
     replyMarkup: renderInstructionsKeyboard(articles.map((a) => ({ id: a.id, title: a.title }))),
   });
 }
@@ -31,7 +37,7 @@ export async function handleInstructionsAddStart(
 ): Promise<void> {
   await store.setSession(callbackQuery.from.id, "admin_instruction_title", {});
   await telegram.answerCallbackQuery(callbackQuery.id);
-  await telegram.sendMessage(callbackQuery.message.chat.id, "Введите заголовок нового раздела:");
+  await sendEphemeral(store, telegram, callbackQuery.from.id, callbackQuery.message.chat.id, "Введите заголовок нового раздела:");
 }
 
 export async function handleInstructionTitle(
@@ -41,12 +47,12 @@ export async function handleInstructionTitle(
 ): Promise<void> {
   const title = (message.text ?? "").trim();
   if (!title) {
-    await telegram.sendMessage(message.chat.id, "Заголовок не может быть пустым. Введите текст.");
+    await sendEphemeral(store, telegram, message.from.id, message.chat.id, "Заголовок не может быть пустым. Введите текст.");
     return;
   }
   await store.setSession(message.from.id, "admin_instruction_body", { title });
-  await telegram.sendMessage(
-    message.chat.id,
+  await sendEphemeral(
+    store, telegram, message.from.id, message.chat.id,
     "Введите текст инструкции. Если нужно приложить видео/ссылку, добавьте её последней строкой.",
   );
 }
@@ -68,15 +74,19 @@ export async function handleInstructionBody(
 ): Promise<void> {
   const raw = message.text ?? "";
   if (!raw.trim()) {
-    await telegram.sendMessage(message.chat.id, "Текст не может быть пустым. Введите текст инструкции.");
+    await sendEphemeral(store, telegram, message.from.id, message.chat.id, "Текст не может быть пустым. Введите текст инструкции.");
     return;
   }
   const { body, mediaUrl } = extractMedia(raw);
   await store.addInstruction(title, body, mediaUrl);
   await store.clearSession(message.from.id);
 
-  await telegram.sendMessage(message.chat.id, "Добавлено ✅");
-  await openInstructionsEditor(store, telegram, message.chat.id);
+  // One message, not two — sendEphemeral would otherwise delete the confirmation the instant
+  // the re-opened editor is sent right after it, so the admin would never see it.
+  const articles = (await store.listInstructions()).filter((a) => a.parentId === null);
+  await sendEphemeral(store, telegram, message.from.id, message.chat.id, "Добавлено ✅", {
+    replyMarkup: renderInstructionsKeyboard(articles.map((a) => ({ id: a.id, title: a.title }))),
+  });
 }
 
 export async function handleInstructionsDelete(
@@ -101,5 +111,6 @@ export async function handleInstructionsDone(
   callbackQuery: TelegramCallbackQuery,
 ): Promise<void> {
   await store.clearSession(callbackQuery.from.id);
+  await clearEphemeral(store, telegram, callbackQuery.from.id);
   await telegram.answerCallbackQuery(callbackQuery.id, "Сохранено.");
 }

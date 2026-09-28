@@ -8,14 +8,16 @@ function fakeTelegram() {
   const sent: { chatId: number; text: string; replyMarkup?: unknown }[] = [];
   const edited: { chatId: number; messageId: number; markup: unknown }[] = [];
   const answered: { id: string; text?: string }[] = [];
+  const deleted: { chatId: number; messageId: number }[] = [];
   const client: TelegramClient = {
-    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); },
+    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); return { messageId: sent.length }; },
     async sendPhoto() {},
+    async deleteMessage(chatId, messageId) { deleted.push({ chatId, messageId }); },
     async answerCallbackQuery(id, text) { answered.push({ id, text }); },
     async editMessageReplyMarkup(chatId, messageId, markup) { edited.push({ chatId, messageId, markup }); },
     async setWebhook() {},
   };
-  return { client, sent, edited, answered };
+  return { client, sent, edited, answered, deleted };
 }
 
 Deno.test("openListEditor sends the prompt with a row per item, plus Готово, and starts the add-text session", async () => {
@@ -40,6 +42,21 @@ Deno.test("handleListEditorAddText with a valid line adds the row and re-sends t
 
   assertEquals((await store.listExpiryItems()).length, 1);
   assertEquals(sent[0].text, "Добавлено ✅");
+});
+
+Deno.test("opening the editor twice deletes the first prompt, and Готово deletes the last one — nothing is left behind", async () => {
+  const store = createInMemoryStore();
+  const { client, deleted, answered } = fakeTelegram();
+
+  await openListEditor(store, client, 1, 1, expiryConfig);
+  await openListEditor(store, client, 1, 1, expiryConfig);
+  assertEquals(deleted, [{ chatId: 1, messageId: 1 }]);
+
+  const cbq: TelegramCallbackQuery = { id: "cbq", from: { id: 1, first_name: "RCA" }, message: { chat: { id: 1 }, message_id: 9 }, data: "admin:list:expiry:done" };
+  await handleListEditorDone(store, client, cbq);
+
+  assertEquals(deleted, [{ chatId: 1, messageId: 1 }, { chatId: 1, messageId: 2 }]);
+  assertEquals(answered, [{ id: "cbq", text: "Сохранено." }]);
 });
 
 Deno.test("handleListEditorAddText with an invalid line reports the error and adds nothing", async () => {

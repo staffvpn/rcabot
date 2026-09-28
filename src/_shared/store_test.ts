@@ -119,6 +119,20 @@ Deno.test("setChecklistProgress upserts by shift+item, and getChecklistProgress 
   assertEquals(progress[0].done, true);
 });
 
+Deno.test("last-ephemeral-message get/set/clear round-trips per telegram id", async () => {
+  const store = createInMemoryStore();
+  assertEquals(await store.getLastEphemeralMessage(42), null);
+
+  await store.setLastEphemeralMessage(42, 42, 100);
+  assertEquals(await store.getLastEphemeralMessage(42), { chatId: 42, messageId: 100 });
+
+  await store.setLastEphemeralMessage(42, 42, 101); // overwrite, not accumulate
+  assertEquals(await store.getLastEphemeralMessage(42), { chatId: 42, messageId: 101 });
+
+  await store.clearLastEphemeralMessage(42);
+  assertEquals(await store.getLastEphemeralMessage(42), null);
+});
+
 Deno.test("session get/set/clear round-trips per telegram id", async () => {
   const store = createInMemoryStore();
   assertEquals(await store.getSession(42), { state: null, data: {} });

@@ -25,13 +25,13 @@ export async function handleAdminMenuSelect(
   key: string,
 ): Promise<void> {
   if (key === "instructions") {
-    await openInstructionsEditor(store, telegram, callbackQuery.message.chat.id);
+    await openInstructionsEditor(store, telegram, callbackQuery.message.chat.id, callbackQuery.from.id);
     await telegram.answerCallbackQuery(callbackQuery.id);
     return;
   }
   const peopleConfig = PEOPLE_EDITOR_CONFIGS[key];
   if (peopleConfig) {
-    await openPeopleEditor(store, telegram, callbackQuery.message.chat.id, peopleConfig);
+    await openPeopleEditor(store, telegram, callbackQuery.message.chat.id, callbackQuery.from.id, peopleConfig);
     await telegram.answerCallbackQuery(callbackQuery.id);
     return;
   }

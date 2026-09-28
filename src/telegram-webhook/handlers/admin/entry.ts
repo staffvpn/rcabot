@@ -1,6 +1,7 @@
 import type { Store } from "../../../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
 import { UNKNOWN_COMMAND_TEXT } from "../../messages.ts";
+import { sendEphemeral } from "../../ephemeral.ts";
 import { renderAdminMenuKeyboard } from "./menu.ts";
 
 export async function handleAdminEntry(
@@ -13,5 +14,7 @@ export async function handleAdminEntry(
     await telegram.sendMessage(message.chat.id, UNKNOWN_COMMAND_TEXT);
     return;
   }
-  await telegram.sendMessage(message.chat.id, "Панель администратора:", { replyMarkup: renderAdminMenuKeyboard() });
+  await sendEphemeral(store, telegram, message.from.id, message.chat.id, "Панель администратора:", {
+    replyMarkup: renderAdminMenuKeyboard(),
+  });
 }

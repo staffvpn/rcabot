@@ -125,6 +125,11 @@ export interface Store {
   getSession(telegramId: number): Promise<SessionState>;
   setSession(telegramId: number, state: string | null, data?: Record<string, unknown>): Promise<void>;
   clearSession(telegramId: number): Promise<void>;
+
+  /** The last "ephemeral" (browsing/admin-panel) message sent to this user, if any is still tracked. */
+  getLastEphemeralMessage(telegramId: number): Promise<{ chatId: number; messageId: number } | null>;
+  setLastEphemeralMessage(telegramId: number, chatId: number, messageId: number): Promise<void>;
+  clearLastEphemeralMessage(telegramId: number): Promise<void>;
 }
 
 function makeId(): string {
@@ -140,6 +145,7 @@ export function createInMemoryStore(): Store {
   const shifts = new Map<string, Shift>();
   const progress = new Map<string, ChecklistProgress>(); // key: `${shiftId}:${checklistItemId}`
   const sessions = new Map<number, SessionState>();
+  const ephemeralMessages = new Map<number, { chatId: number; messageId: number }>();
 
   const schedule: ScheduleDay[] = [
     { weekday: 0, opensAt: "08:30", closesAt: "19:30" },
@@ -324,6 +330,16 @@ export function createInMemoryStore(): Store {
     },
     async clearSession(telegramId) {
       sessions.delete(telegramId);
+    },
+
+    async getLastEphemeralMessage(telegramId) {
+      return ephemeralMessages.get(telegramId) ?? null;
+    },
+    async setLastEphemeralMessage(telegramId, chatId, messageId) {
+      ephemeralMessages.set(telegramId, { chatId, messageId });
+    },
+    async clearLastEphemeralMessage(telegramId) {
+      ephemeralMessages.delete(telegramId);
     },
   };
 }

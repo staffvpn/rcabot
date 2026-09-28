@@ -10,14 +10,16 @@ function fakeTelegram() {
   const sent: { chatId: number; text: string; replyMarkup?: unknown }[] = [];
   const edited: { chatId: number; messageId: number; markup: unknown }[] = [];
   const answered: { id: string; text?: string }[] = [];
+  const deleted: { chatId: number; messageId: number }[] = [];
   const client: TelegramClient = {
-    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); },
+    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); return { messageId: sent.length }; },
     async sendPhoto() {},
+    async deleteMessage(chatId, messageId) { deleted.push({ chatId, messageId }); },
     async answerCallbackQuery(id, text) { answered.push({ id, text }); },
     async editMessageReplyMarkup(chatId, messageId, markup) { edited.push({ chatId, messageId, markup }); },
     async setWebhook() {},
   };
-  return { client, sent, edited, answered };
+  return { client, sent, edited, answered, deleted };
 }
 
 function msg(text: string): TelegramMessage {
@@ -32,7 +34,7 @@ Deno.test("an empty instructions list still shows Добавить and Гото�
   const store = createInMemoryStore();
   const { client, sent } = fakeTelegram();
 
-  await openInstructionsEditor(store, client, 1);
+  await openInstructionsEditor(store, client, 1, 1);
 
   const keyboard = sent[0].replyMarkup as { inline_keyboard: unknown[][] };
   assertEquals(keyboard.inline_keyboard.length, 2);
@@ -44,10 +46,24 @@ Deno.test("the editor list shows only top-level articles — sub-sections are no
   await store.addInstruction("Открытие смены", "1. ...", null, parent.id);
   const { client, sent } = fakeTelegram();
 
-  await openInstructionsEditor(store, client, 1);
+  await openInstructionsEditor(store, client, 1, 1);
 
   const keyboard = sent[0].replyMarkup as { inline_keyboard: unknown[][] };
   assertEquals(keyboard.inline_keyboard.length, 3); // parent + Добавить + Готово
+});
+
+Deno.test("opening the editor twice deletes the first prompt, and Готово deletes the last one — nothing is left behind", async () => {
+  const store = createInMemoryStore();
+  const { client, deleted, answered } = fakeTelegram();
+
+  await openInstructionsEditor(store, client, 1, 1);
+  await openInstructionsEditor(store, client, 1, 1);
+  assertEquals(deleted, [{ chatId: 1, messageId: 1 }]);
+
+  await handleInstructionsDone(store, client, cbq("admin:instr:done"));
+
+  assertEquals(deleted, [{ chatId: 1, messageId: 1 }, { chatId: 1, messageId: 2 }]);
+  assertEquals(answered, [{ id: "cbq", text: "Сохранено." }]);
 });
 
 Deno.test("handleInstructionsAddStart starts the title-capture session and prompts for it", async () => {

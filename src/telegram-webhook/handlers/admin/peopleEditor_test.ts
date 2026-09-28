@@ -10,14 +10,16 @@ function fakeTelegram() {
   const sent: { chatId: number; text: string; replyMarkup?: unknown }[] = [];
   const edited: { chatId: number; messageId: number; markup: unknown }[] = [];
   const answered: { id: string; text?: string }[] = [];
+  const deleted: { chatId: number; messageId: number }[] = [];
   const client: TelegramClient = {
-    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); },
+    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); return { messageId: sent.length }; },
     async sendPhoto() {},
+    async deleteMessage(chatId, messageId) { deleted.push({ chatId, messageId }); },
     async answerCallbackQuery(id, text) { answered.push({ id, text }); },
     async editMessageReplyMarkup(chatId, messageId, markup) { edited.push({ chatId, messageId, markup }); },
     async setWebhook() {},
   };
-  return { client, sent, edited, answered };
+  return { client, sent, edited, answered, deleted };
 }
 
 function forwardedMsg(fromId: number, forwardFromId?: number): TelegramMessage {
@@ -91,10 +93,33 @@ Deno.test("openPeopleEditor lists current people plus Добавить and Го�
   await store.addEmployee(1, "Анна");
   const { client, sent } = fakeTelegram();
 
-  await openPeopleEditor(store, client, 1, employeesConfig);
+  await openPeopleEditor(store, client, 1, 1, employeesConfig);
 
   const keyboard = sent[0].replyMarkup as { inline_keyboard: unknown[][] };
   assertEquals(keyboard.inline_keyboard.length, 3); // Анна + Добавить + Готово
+});
+
+Deno.test("opening the editor twice deletes the first prompt, and Готово deletes the last one — nothing is left behind", async () => {
+  const store = createInMemoryStore();
+  const { client, deleted, answered } = fakeTelegram();
+
+  await openPeopleEditor(store, client, 1, 1, employeesConfig);
+  await openPeopleEditor(store, client, 1, 1, employeesConfig);
+  assertEquals(deleted, [{ chatId: 1, messageId: 1 }]);
+
+  await handlePeopleDone(store, client, cbq("admin:people:employees:done"));
+
+  assertEquals(deleted, [{ chatId: 1, messageId: 1 }, { chatId: 1, messageId: 2 }]);
+  assertEquals(answered, [{ id: "cbq", text: "Сохранено." }]);
+});
+
+Deno.test("forwarding a new person shows one message (confirmation + list), not a confirmation that gets instantly deleted", async () => {
+  const store = createInMemoryStore();
+  const { client, deleted } = fakeTelegram();
+
+  await handlePeopleForward(store, client, forwardedMsg(1, 555), employeesConfig);
+
+  assertEquals(deleted, []); // nothing tracked yet before this, so nothing to delete
 });
 
 Deno.test("handlePeopleAddStart starts the forward-capture session and explains what to do", async () => {

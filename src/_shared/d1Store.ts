@@ -234,5 +234,22 @@ export function createD1Store(db: D1Database): Store {
     async clearSession(telegramId) {
       await this.setSession(telegramId, null, {});
     },
+
+    async getLastEphemeralMessage(telegramId) {
+      const row = await first("select chat_id, message_id from ephemeral_messages where telegram_id = ?", telegramId);
+      return row ? { chatId: row.chat_id as number, messageId: row.message_id as number } : null;
+    },
+    async setLastEphemeralMessage(telegramId, chatId, messageId) {
+      await run(
+        `insert into ephemeral_messages (telegram_id, chat_id, message_id)
+         values (?, ?, ?)
+         on conflict (telegram_id)
+         do update set chat_id = excluded.chat_id, message_id = excluded.message_id`,
+        telegramId, chatId, messageId,
+      );
+    },
+    async clearLastEphemeralMessage(telegramId) {
+      await run("delete from ephemeral_messages where telegram_id = ?", telegramId);
+    },
   };
 }

@@ -1,5 +1,6 @@
 import type { Store } from "../../../_shared/store.ts";
 import type { InlineKeyboard, TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
+import { clearEphemeral, sendEphemeral } from "../../ephemeral.ts";
 
 export interface PeopleRow {
   id: string;
@@ -47,10 +48,13 @@ export async function openPeopleEditor(
   store: Store,
   telegram: TelegramClient,
   chatId: number,
+  telegramId: number,
   config: PeopleEditorConfig,
 ): Promise<void> {
   const rows = await config.listRows(store);
-  await telegram.sendMessage(chatId, config.promptText, { replyMarkup: renderPeopleKeyboard(config.key, rows) });
+  await sendEphemeral(store, telegram, telegramId, chatId, config.promptText, {
+    replyMarkup: renderPeopleKeyboard(config.key, rows),
+  });
 }
 
 export async function handlePeopleAddStart(
@@ -61,8 +65,8 @@ export async function handlePeopleAddStart(
 ): Promise<void> {
   await store.setSession(callbackQuery.from.id, "admin_people_add", { key: config.key });
   await telegram.answerCallbackQuery(callbackQuery.id);
-  await telegram.sendMessage(
-    callbackQuery.message.chat.id,
+  await sendEphemeral(
+    store, telegram, callbackQuery.from.id, callbackQuery.message.chat.id,
     "Попросите нового человека написать боту /start, затем перешлите сюда любое его сообщение — бот возьмёт из него Telegram.",
   );
 }
@@ -74,8 +78,8 @@ export async function handlePeopleForward(
   config: PeopleEditorConfig,
 ): Promise<void> {
   if (message.forward_origin?.type === "hidden_user") {
-    await telegram.sendMessage(
-      message.chat.id,
+    await sendEphemeral(
+      store, telegram, message.from.id, message.chat.id,
       "У этого человека скрыт отправитель при пересылке — Telegram не передаёт его ID. Попросите его открыть Настройки → Конфиденциальность → Пересылка сообщений, разрешить показ отправителя и переслать сообщение ещё раз.",
     );
     return;
@@ -83,15 +87,19 @@ export async function handlePeopleForward(
 
   const forwarded = extractForwardedUser(message);
   if (!forwarded) {
-    await telegram.sendMessage(message.chat.id, "Это не похоже на пересланное сообщение. Перешлите сюда сообщение от нужного человека.");
+    await sendEphemeral(store, telegram, message.from.id, message.chat.id, "Это не похоже на пересланное сообщение. Перешлите сюда сообщение от нужного человека.");
     return;
   }
 
   await config.add(store, forwarded.telegramId, forwarded.fullName);
   await store.clearSession(message.from.id);
 
-  await telegram.sendMessage(message.chat.id, `Добавлен(а) ✅ ${forwarded.fullName}`);
-  await openPeopleEditor(store, telegram, message.chat.id, config);
+  // One message, not two — sendEphemeral would otherwise delete the confirmation the instant
+  // the re-opened editor is sent right after it, so the admin would never see it.
+  const rows = await config.listRows(store);
+  await sendEphemeral(store, telegram, message.from.id, message.chat.id, `Добавлен(а) ✅ ${forwarded.fullName}`, {
+    replyMarkup: renderPeopleKeyboard(config.key, rows),
+  });
 }
 
 export async function handlePeopleDelete(
@@ -130,6 +138,7 @@ export async function handlePeopleDone(
   callbackQuery: TelegramCallbackQuery,
 ): Promise<void> {
   await store.clearSession(callbackQuery.from.id);
+  await clearEphemeral(store, telegram, callbackQuery.from.id);
   await telegram.answerCallbackQuery(callbackQuery.id, "Сохранено.");
 }
 

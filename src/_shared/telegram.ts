@@ -61,9 +61,15 @@ export interface SendMessageOptions {
   replyMarkup?: ReplyMarkup;
 }
 
+export interface SentMessage {
+  messageId: number;
+}
+
 export interface TelegramClient {
-  sendMessage(chatId: number, text: string, opts?: SendMessageOptions): Promise<void>;
+  sendMessage(chatId: number, text: string, opts?: SendMessageOptions): Promise<SentMessage>;
   sendPhoto(chatId: number, fileId: string, caption?: string): Promise<void>;
+  /** Best-effort: swallows failures (message already gone, too old, etc.) instead of throwing. */
+  deleteMessage(chatId: number, messageId: number): Promise<void>;
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
   editMessageReplyMarkup(chatId: number, messageId: number, markup: InlineKeyboard): Promise<void>;
   setWebhook(url: string, secretToken: string): Promise<void>;
@@ -88,10 +94,20 @@ export function createTelegramClient(
 
   return {
     async sendMessage(chatId, text, opts) {
-      await call("sendMessage", { chat_id: chatId, text, reply_markup: opts?.replyMarkup });
+      const result = (await call("sendMessage", { chat_id: chatId, text, reply_markup: opts?.replyMarkup })) as {
+        result: { message_id: number };
+      };
+      return { messageId: result.result.message_id };
     },
     async sendPhoto(chatId, fileId, caption) {
       await call("sendPhoto", { chat_id: chatId, photo: fileId, caption });
+    },
+    async deleteMessage(chatId, messageId) {
+      try {
+        await call("deleteMessage", { chat_id: chatId, message_id: messageId });
+      } catch (err) {
+        console.error("deleteMessage: best-effort cleanup failed", err);
+      }
     },
     async answerCallbackQuery(callbackQueryId, text) {
       await call("answerCallbackQuery", { callback_query_id: callbackQueryId, text });

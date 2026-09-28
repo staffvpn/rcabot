@@ -1,5 +1,6 @@
 import type { Store } from "../../_shared/store.ts";
 import type { TelegramClient, TelegramMessage } from "../../_shared/telegram.ts";
+import { sendEphemeral } from "../ephemeral.ts";
 
 export async function handleExpiryList(
   store: Store,
@@ -12,12 +13,12 @@ export async function handleExpiryList(
 
   const items = await store.listExpiryItems();
   if (items.length === 0) {
-    await telegram.sendMessage(message.chat.id, "Список сроков годности пока пуст.");
+    await sendEphemeral(store, telegram, message.from.id, message.chat.id, "Список сроков годности пока пуст.");
     return;
   }
   const lines = items.map((i) => `${i.name} — ${i.shelfLifeDays} суток`);
-  await telegram.sendMessage(
-    message.chat.id,
+  await sendEphemeral(
+    store, telegram, message.from.id, message.chat.id,
     `СРОКИ ГОДНОСТИ\n${lines.join("\n")}\n\n🔗 Полный ассортимент: https://www.zhirnova.net`,
   );
 }

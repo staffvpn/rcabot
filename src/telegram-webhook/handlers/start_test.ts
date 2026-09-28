@@ -7,8 +7,9 @@ import { handleStart } from "./start.ts";
 function fakeTelegram() {
   const sent: { chatId: number; text: string; replyMarkup?: unknown }[] = [];
   const client: TelegramClient = {
-    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); },
+    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); return { messageId: sent.length }; },
     async sendPhoto() {},
+    async deleteMessage() {},
     async answerCallbackQuery() {},
     async editMessageReplyMarkup() {},
     async setWebhook() {},

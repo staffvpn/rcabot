@@ -5,11 +5,13 @@ import { handleInstructionShow, handleInstructionsMenu } from "./instructions.ts
 
 function fakeTelegram() {
   const sent: { chatId: number; text: string; replyMarkup?: unknown }[] = [];
+  const deleted: { chatId: number; messageId: number }[] = [];
   const client: TelegramClient = {
-    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); },
-    async sendPhoto() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
+    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); return { messageId: sent.length }; },
+    async sendPhoto() {}, async deleteMessage(chatId, messageId) { deleted.push({ chatId, messageId }); },
+    async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
   };
-  return { client, sent };
+  return { client, sent, deleted };
 }
 
 Deno.test("a stranger (not a registered employee or admin) gets no response from the instructions menu", async () => {
@@ -89,6 +91,22 @@ Deno.test("opening a sub-section article shows its own body, same as any leaf ar
   await handleInstructionShow(store, client, cbq, child.id);
 
   assertEquals(sent, [{ chatId: 1, text: "ОТКРЫТИЕ СМЕНЫ\n1. Откройте Настройки...", replyMarkup: undefined }]);
+});
+
+Deno.test("navigating menu → submenu → article deletes the previous step's message each time", async () => {
+  const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
+  const parent = await store.addInstruction("Информация по смене", "Выберите раздел ниже.", null);
+  const child = await store.addInstruction("Открытие смены", "1. Откройте Настройки...", null, parent.id);
+  const { client, deleted } = fakeTelegram();
+
+  await handleInstructionsMenu(store, client, { message_id: 1, from: { id: 1, first_name: "Анна" }, chat: { id: 1 }, text: "📖 Инструкции" });
+  const cbq1: TelegramCallbackQuery = { id: "cbq1", from: { id: 1, first_name: "Анна" }, message: { chat: { id: 1 }, message_id: 5 }, data: `instr:show:${parent.id}` };
+  await handleInstructionShow(store, client, cbq1, parent.id);
+  const cbq2: TelegramCallbackQuery = { id: "cbq2", from: { id: 1, first_name: "Анна" }, message: { chat: { id: 1 }, message_id: 5 }, data: `instr:show:${child.id}` };
+  await handleInstructionShow(store, client, cbq2, child.id);
+
+  assertEquals(deleted, [{ chatId: 1, messageId: 1 }, { chatId: 1, messageId: 2 }]);
 });
 
 Deno.test("showing an article with no media prints just the title and body", async () => {

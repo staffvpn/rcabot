@@ -7,14 +7,16 @@ function fakeTelegram() {
   const sent: { chatId: number; text: string; replyMarkup?: unknown }[] = [];
   const edited: unknown[] = [];
   const answered: { id: string; text?: string }[] = [];
+  const deleted: { chatId: number; messageId: number }[] = [];
   const client: TelegramClient = {
-    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); },
+    async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); return { messageId: sent.length }; },
     async sendPhoto() {},
+    async deleteMessage(chatId, messageId) { deleted.push({ chatId, messageId }); },
     async answerCallbackQuery(id, text) { answered.push({ id, text }); },
     async editMessageReplyMarkup(...args) { edited.push(args); },
     async setWebhook() {},
   };
-  return { client, sent, edited, answered };
+  return { client, sent, edited, answered, deleted };
 }
 
 function cbq(data: string): TelegramCallbackQuery {

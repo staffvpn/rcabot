@@ -9,8 +9,8 @@ Deno.test("notifyAdmins sends the same text to every admin", async () => {
   await store.addAdmin(200, "Мария");
   const sent: number[] = [];
   const telegram: TelegramClient = {
-    async sendMessage(chatId) { sent.push(chatId); },
-    async sendPhoto() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
+    async sendMessage(chatId) { sent.push(chatId); return { messageId: 1 }; },
+    async sendPhoto() {}, async deleteMessage() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
   };
 
   await notifyAdmins(store, telegram, "hello");
@@ -22,8 +22,8 @@ Deno.test("notifyAdmins is a no-op when there are no admins yet", async () => {
   const store = createInMemoryStore();
   const sent: number[] = [];
   const telegram: TelegramClient = {
-    async sendMessage(chatId) { sent.push(chatId); },
-    async sendPhoto() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
+    async sendMessage(chatId) { sent.push(chatId); return { messageId: 1 }; },
+    async sendPhoto() {}, async deleteMessage() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
   };
 
   await notifyAdmins(store, telegram, "hello");
@@ -40,8 +40,9 @@ Deno.test("notifyAdmins does not throw when one admin is unreachable, and still 
     async sendMessage(chatId) {
       if (chatId === 1) throw new Error("Forbidden: bot can't initiate conversation with a user");
       sent.push(chatId);
+      return { messageId: 1 };
     },
-    async sendPhoto() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
+    async sendPhoto() {}, async deleteMessage() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
   };
 
   await notifyAdmins(store, telegram, "hello"); // must not reject

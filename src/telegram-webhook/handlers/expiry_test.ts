@@ -5,11 +5,13 @@ import { handleExpiryList } from "./expiry.ts";
 
 function fakeTelegram() {
   const sent: { chatId: number; text: string }[] = [];
+  const deleted: { chatId: number; messageId: number }[] = [];
   const client: TelegramClient = {
-    async sendMessage(chatId, text) { sent.push({ chatId, text }); },
-    async sendPhoto() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
+    async sendMessage(chatId, text) { sent.push({ chatId, text }); return { messageId: sent.length }; },
+    async sendPhoto() {}, async deleteMessage(chatId, messageId) { deleted.push({ chatId, messageId }); },
+    async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
   };
-  return { client, sent };
+  return { client, sent, deleted };
 }
 
 function msg(): TelegramMessage {
@@ -34,6 +36,19 @@ Deno.test("an empty expiry list says so instead of sending a blank list", async 
   await handleExpiryList(store, client, msg());
 
   assertEquals(sent, [{ chatId: 1, text: "Список сроков годности пока пуст." }]);
+});
+
+Deno.test("tapping Сроки годности again deletes the previous listing instead of piling up a new one", async () => {
+  const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
+  await store.addExpiryItem("Канеле", 2);
+  const { client, sent, deleted } = fakeTelegram();
+
+  await handleExpiryList(store, client, msg());
+  await handleExpiryList(store, client, msg());
+
+  assertEquals(sent.length, 2);
+  assertEquals(deleted, [{ chatId: 1, messageId: 1 }]);
 });
 
 Deno.test("the expiry list is formatted as one 'name — N суток' line per item, in position order, with the supplier reference link appended", async () => {
