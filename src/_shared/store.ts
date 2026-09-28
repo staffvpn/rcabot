@@ -158,12 +158,23 @@ export function createInMemoryStore(): Store {
       return [...employees.values()];
     },
     async addEmployee(telegramId, fullName) {
+      for (const e of employees.values()) {
+        if (e.telegramId === telegramId) {
+          const reactivated = { ...e, fullName, active: true };
+          employees.set(e.id, reactivated);
+          return reactivated;
+        }
+      }
       const employee: Employee = { id: makeId(), telegramId, fullName, active: true };
       employees.set(employee.id, employee);
       return employee;
     },
     async removeEmployee(id) {
-      employees.delete(id);
+      // Soft delete: shifts.employee_id is a foreign key, and shift history must survive a
+      // departed employee. This also lets addEmployee reactivate the same row on a later re-add
+      // instead of violating the telegram_id unique constraint with a second row.
+      const employee = employees.get(id);
+      if (employee) employees.set(id, { ...employee, active: false });
     },
 
     async getAdminByTelegramId(telegramId) {
@@ -174,6 +185,13 @@ export function createInMemoryStore(): Store {
       return [...admins.values()];
     },
     async addAdmin(telegramId, fullName) {
+      for (const a of admins.values()) {
+        if (a.telegramId === telegramId) {
+          const updated = { ...a, fullName };
+          admins.set(a.id, updated);
+          return updated;
+        }
+      }
       const admin: Admin = { id: makeId(), telegramId, fullName };
       admins.set(admin.id, admin);
       return admin;

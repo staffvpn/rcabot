@@ -73,11 +73,18 @@ export function createD1Store(db: D1Database): Store {
     },
     async addEmployee(telegramId, fullName) {
       const id = makeId();
-      await run("insert into employees (id, telegram_id, full_name) values (?, ?, ?)", id, telegramId, fullName);
-      return { id, telegramId, fullName, active: true };
+      await run(
+        `insert into employees (id, telegram_id, full_name) values (?, ?, ?)
+         on conflict (telegram_id) do update set full_name = excluded.full_name, active = 1`,
+        id, telegramId, fullName,
+      );
+      return (await this.getEmployeeByTelegramId(telegramId))!;
     },
     async removeEmployee(id) {
-      await run("delete from employees where id = ?", id);
+      // Soft delete: shifts.employee_id is a foreign key, and shift history must survive a
+      // departed employee. This also lets addEmployee reactivate the same row on a later
+      // re-add instead of violating the telegram_id unique constraint with a second row.
+      await run("update employees set active = 0 where id = ?", id);
     },
 
     async getAdminByTelegramId(telegramId) {
@@ -89,8 +96,12 @@ export function createD1Store(db: D1Database): Store {
     },
     async addAdmin(telegramId, fullName) {
       const id = makeId();
-      await run("insert into admins (id, telegram_id, full_name) values (?, ?, ?)", id, telegramId, fullName);
-      return { id, telegramId, fullName };
+      await run(
+        `insert into admins (id, telegram_id, full_name) values (?, ?, ?)
+         on conflict (telegram_id) do update set full_name = excluded.full_name`,
+        id, telegramId, fullName,
+      );
+      return (await this.getAdminByTelegramId(telegramId))!;
     },
     async removeAdmin(id) {
       const countRow = await first("select count(*) as n from admins");

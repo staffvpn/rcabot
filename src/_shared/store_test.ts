@@ -16,6 +16,42 @@ Deno.test("getEmployeeByTelegramId returns null for an unknown telegram id", asy
   assertEquals(await store.getEmployeeByTelegramId(999), null);
 });
 
+Deno.test("removeEmployee soft-deletes: the row is marked inactive but shift history still resolves to it", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Уволена");
+  const shift = await store.createShift(employee.id, "2026-09-25");
+
+  await store.removeEmployee(employee.id);
+
+  const found = (await store.listEmployees()).find((e) => e.id === employee.id);
+  assertEquals(found?.active, false);
+  assertEquals((await store.getShiftById(shift.id))?.employeeId, employee.id);
+});
+
+Deno.test("addEmployee is idempotent by telegram id: re-adding reactivates the same row instead of duplicating it", async () => {
+  const store = createInMemoryStore();
+  const first = await store.addEmployee(555, "Анна");
+  await store.removeEmployee(first.id);
+
+  const second = await store.addEmployee(555, "Анна Б.");
+
+  assertEquals(second.id, first.id);
+  assertEquals(second.active, true);
+  assertEquals(second.fullName, "Анна Б.");
+  assertEquals((await store.listEmployees()).length, 1);
+});
+
+Deno.test("addAdmin is idempotent by telegram id: re-adding the same person does not create a duplicate", async () => {
+  const store = createInMemoryStore();
+  const first = await store.addAdmin(1, "RCA");
+
+  const second = await store.addAdmin(1, "RCA (обновлено)");
+
+  assertEquals(second.id, first.id);
+  assertEquals(second.fullName, "RCA (обновлено)");
+  assertEquals((await store.listAdmins()).length, 1);
+});
+
 Deno.test("removeAdmin refuses to delete the last remaining admin", async () => {
   const store = createInMemoryStore();
   const admin = await store.addAdmin(1, "RCA");

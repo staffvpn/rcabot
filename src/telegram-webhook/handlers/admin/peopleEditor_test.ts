@@ -73,6 +73,19 @@ Deno.test("a forward with hidden sender identity gets a specific explanation, no
   assertEquals(sent[0].text.includes("скрыт"), true);
 });
 
+Deno.test("deleting an employee soft-deletes them, so they drop off the editor list without duplicating on re-add", async () => {
+  const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
+  const { client } = fakeTelegram();
+
+  await handlePeopleDelete(store, client, cbq("admin:people:employees:del:0"), employeesConfig, "0");
+
+  assertEquals(await employeesConfig.listRows(store), []);
+
+  await handlePeopleForward(store, client, forwardedMsg(1, 1), employeesConfig);
+  assertEquals((await store.listEmployees()).length, 1); // reactivated, not duplicated
+});
+
 Deno.test("openPeopleEditor lists current people plus Добавить and Готово", async () => {
   const store = createInMemoryStore();
   await store.addEmployee(1, "Анна");

@@ -137,7 +137,9 @@ export const employeesConfig: PeopleEditorConfig = {
   key: "employees",
   promptText: "Сотрудники. Нажмите 🗑, чтобы удалить, «➕ Добавить» — чтобы подключить нового.",
   async listRows(store) {
-    return (await store.listEmployees()).map((e) => ({ id: e.id, label: e.fullName }));
+    // removeEmployee soft-deletes (shift history keeps the FK alive) — the editor must still
+    // hide inactive rows, or "deleting" someone would look like it did nothing.
+    return (await store.listEmployees()).filter((e) => e.active).map((e) => ({ id: e.id, label: e.fullName }));
   },
   async add(store, telegramId, fullName) {
     await store.addEmployee(telegramId, fullName);
