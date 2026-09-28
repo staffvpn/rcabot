@@ -30,6 +30,19 @@ Deno.test("an employee 9 minutes from opening gets the reminder exactly once acr
   assertEquals(reminders.length, 1);
 });
 
+Deno.test("the lateness notice names no specific employee — with a shared cash drawer, we don't know who was actually due in", async () => {
+  const store = createInMemoryStore();
+  await store.addAdmin(999, "RCA");
+  await store.addEmployee(1, "Анна");
+  const { client, sent } = fakeTelegram();
+
+  await runCronTick(store, client, atVenueTime("08:30"));
+
+  const lateNotice = sent.find((m) => m.chatId === 999 && m.text.includes("Опоздание"));
+  assertEquals(lateNotice?.text.includes("Анна"), false);
+  assertEquals(lateNotice?.text, "🔴 Опоздание: смена не открыта вовремя (по графику 08:30).");
+});
+
 Deno.test("an employee who never opens gets exactly one lateness notice to admins, not one per tick", async () => {
   const store = createInMemoryStore();
   await store.addAdmin(999, "RCA");

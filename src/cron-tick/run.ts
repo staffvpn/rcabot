@@ -59,10 +59,13 @@ async function applyAction(
       await store.updateShift(shift.id, { remindedOpenAt: now });
       break;
     case "notify_late":
+      // No employee name here: single venue, shared cash drawer — this fires for whichever
+      // registered employee's shift the cron happens to check first, which isn't necessarily
+      // who was actually due in. Naming them would blame the wrong person.
       await notifyAdmins(
         store,
         telegram,
-        `🔴 Опоздание: ${employee.fullName} не открыла смену вовремя (по графику ${scheduleDay.opensAt}).`,
+        `🔴 Опоздание: смена не открыта вовремя (по графику ${scheduleDay.opensAt}).`,
       );
       await store.updateShift(shift.id, { notifiedLateAt: now });
       break;
