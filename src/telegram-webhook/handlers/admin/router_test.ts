@@ -40,12 +40,12 @@ Deno.test("admin:menu:instructions opens the instructions editor", async () => {
   assertEquals(answered.length, 1);
 });
 
-Deno.test("admin:list:expiry:del:<id> deletes the row", async () => {
+Deno.test("admin:list:expiry:del:<index> deletes the row at that position", async () => {
   const store = createInMemoryStore();
-  const item = await store.addExpiryItem("Канеле", 2);
+  await store.addExpiryItem("Канеле", 2);
   const { client } = fakeTelegram();
 
-  await routeAdminCallback(store, client, cbq(`admin:list:expiry:del:${item.id}`));
+  await routeAdminCallback(store, client, cbq("admin:list:expiry:del:0"));
 
   assertEquals((await store.listExpiryItems()).length, 0);
 });

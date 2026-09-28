@@ -23,7 +23,21 @@ function fakeTelegram() {
 function forwardedMsg(fromId: number, forwardFromId?: number): TelegramMessage {
   return {
     message_id: 1, from: { id: fromId, first_name: "RCA" }, chat: { id: fromId }, text: "переслано",
-    forward_from: forwardFromId ? { id: forwardFromId, first_name: "Мария" } : undefined,
+    forward_origin: forwardFromId ? { type: "user", sender_user: { id: forwardFromId, first_name: "Мария" } } : undefined,
+  };
+}
+
+function legacyForwardedMsg(fromId: number, forwardFromId: number): TelegramMessage {
+  return {
+    message_id: 1, from: { id: fromId, first_name: "RCA" }, chat: { id: fromId }, text: "переслано",
+    forward_from: { id: forwardFromId, first_name: "Мария" },
+  };
+}
+
+function hiddenForwardMsg(fromId: number): TelegramMessage {
+  return {
+    message_id: 1, from: { id: fromId, first_name: "RCA" }, chat: { id: fromId }, text: "переслано",
+    forward_origin: { type: "hidden_user", sender_user_name: "Мария" },
   };
 }
 
@@ -31,13 +45,32 @@ function cbq(data: string): TelegramCallbackQuery {
   return { id: "cbq", from: { id: 1, first_name: "RCA" }, message: { chat: { id: 1 }, message_id: 9 }, data };
 }
 
-Deno.test("extractForwardedUser reads the id and name off a forwarded message", () => {
+Deno.test("extractForwardedUser reads the id and name off a forwarded message (forward_origin, current Bot API)", () => {
   const result = extractForwardedUser(forwardedMsg(1, 555));
+  assertEquals(result, { telegramId: 555, fullName: "Мария" });
+});
+
+Deno.test("extractForwardedUser falls back to the deprecated forward_from field", () => {
+  const result = extractForwardedUser(legacyForwardedMsg(1, 555));
   assertEquals(result, { telegramId: 555, fullName: "Мария" });
 });
 
 Deno.test("extractForwardedUser returns null for a message that was not forwarded", () => {
   assertEquals(extractForwardedUser(forwardedMsg(1)), null);
+});
+
+Deno.test("extractForwardedUser returns null for a forward with hidden sender identity", () => {
+  assertEquals(extractForwardedUser(hiddenForwardMsg(1)), null);
+});
+
+Deno.test("a forward with hidden sender identity gets a specific explanation, not the generic 'not a forward' message", async () => {
+  const store = createInMemoryStore();
+  const { client, sent } = fakeTelegram();
+
+  await handlePeopleForward(store, client, hiddenForwardMsg(1), employeesConfig);
+
+  assertEquals((await store.listEmployees()).length, 0);
+  assertEquals(sent[0].text.includes("скрыт"), true);
 });
 
 Deno.test("openPeopleEditor lists current people plus Добавить and Готово", async () => {
@@ -88,26 +121,41 @@ Deno.test("forwarding a message adds the employee, confirms, and re-opens the li
 Deno.test("deleting a non-last admin succeeds and edits the keyboard", async () => {
   const store = createInMemoryStore();
   await store.addAdmin(1, "RCA");
-  const second = await store.addAdmin(2, "Мария");
+  await store.addAdmin(2, "Мария");
   const { client, edited, answered } = fakeTelegram();
 
-  await handlePeopleDelete(store, client, cbq(`admin:people:admins:del:${second.id}`), adminsConfig, second.id);
+  // "Мария" is row index 1 in employeesConfig.listRows/adminsConfig.listRows order.
+  await handlePeopleDelete(store, client, cbq("admin:people:admins:del:1"), adminsConfig, "1");
 
-  assertEquals((await store.listAdmins()).length, 1);
+  const remaining = await store.listAdmins();
+  assertEquals(remaining.length, 1);
+  assertEquals(remaining[0].fullName, "RCA");
   assertEquals(edited.length, 1);
   assertEquals(answered, [{ id: "cbq", text: undefined }]);
 });
 
 Deno.test("deleting the last remaining admin fails with a clear message instead of crashing or succeeding", async () => {
   const store = createInMemoryStore();
-  const only = await store.addAdmin(1, "RCA");
+  await store.addAdmin(1, "RCA");
   const { client, edited, answered } = fakeTelegram();
 
-  await handlePeopleDelete(store, client, cbq(`admin:people:admins:del:${only.id}`), adminsConfig, only.id);
+  await handlePeopleDelete(store, client, cbq("admin:people:admins:del:0"), adminsConfig, "0");
 
   assertEquals((await store.listAdmins()).length, 1);
   assertEquals(edited.length, 0);
   assertEquals(answered[0].text?.includes("last remaining admin"), true);
+});
+
+Deno.test("deleting an out-of-range index answers the callback without touching the store", async () => {
+  const store = createInMemoryStore();
+  await store.addAdmin(1, "RCA");
+  const { client, edited, answered } = fakeTelegram();
+
+  await handlePeopleDelete(store, client, cbq("admin:people:admins:del:5"), adminsConfig, "5");
+
+  assertEquals((await store.listAdmins()).length, 1);
+  assertEquals(edited.length, 0);
+  assertEquals(answered, [{ id: "cbq", text: undefined }]);
 });
 
 Deno.test("handlePeopleDone clears any lingering add-capture session", async () => {

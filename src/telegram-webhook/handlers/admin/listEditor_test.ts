@@ -1,8 +1,8 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
-import { handleListEditorAddText, handleListEditorDelete, handleListEditorDone, openListEditor } from "./listEditor.ts";
-import { expiryConfig } from "./listEditorConfigs.ts";
+import { handleListEditorAddText, handleListEditorDelete, handleListEditorDone, openListEditor, renderListEditorKeyboard } from "./listEditor.ts";
+import { checklistOpenConfig, expiryConfig } from "./listEditorConfigs.ts";
 
 function fakeTelegram() {
   const sent: { chatId: number; text: string; replyMarkup?: unknown }[] = [];
@@ -53,17 +53,39 @@ Deno.test("handleListEditorAddText with an invalid line reports the error and ad
   assertEquals(sent[0].text.includes("Формат"), true);
 });
 
-Deno.test("handleListEditorDelete removes the row and edits the keyboard in place", async () => {
+Deno.test("handleListEditorDelete removes the row (addressed by list position, not id) and edits the keyboard in place", async () => {
   const store = createInMemoryStore();
-  const item = await store.addExpiryItem("Канеле", 2);
+  await store.addExpiryItem("Канеле", 2);
   const { client, edited, answered } = fakeTelegram();
-  const cbq: TelegramCallbackQuery = { id: "cbq", from: { id: 1, first_name: "RCA" }, message: { chat: { id: 1 }, message_id: 9 }, data: `admin:list:expiry:del:${item.id}` };
+  const cbq: TelegramCallbackQuery = { id: "cbq", from: { id: 1, first_name: "RCA" }, message: { chat: { id: 1 }, message_id: 9 }, data: "admin:list:expiry:del:0" };
 
-  await handleListEditorDelete(store, client, cbq, expiryConfig, item.id);
+  await handleListEditorDelete(store, client, cbq, expiryConfig, "0");
 
   assertEquals((await store.listExpiryItems()).length, 0);
   assertEquals(edited[0].messageId, 9);
   assertEquals(answered, [{ id: "cbq", text: undefined }]);
+});
+
+Deno.test("handleListEditorDelete on an out-of-range position answers harmlessly and changes nothing", async () => {
+  const store = createInMemoryStore();
+  await store.addExpiryItem("Канеле", 2);
+  const { client, edited, answered } = fakeTelegram();
+  const cbq: TelegramCallbackQuery = { id: "cbq", from: { id: 1, first_name: "RCA" }, message: { chat: { id: 1 }, message_id: 9 }, data: "admin:list:expiry:del:7" };
+
+  await handleListEditorDelete(store, client, cbq, expiryConfig, "7");
+
+  assertEquals((await store.listExpiryItems()).length, 1);
+  assertEquals(edited, []);
+  assertEquals(answered, [{ id: "cbq", text: undefined }]);
+});
+
+Deno.test("callback_data for a checklist row stays within Telegram's 64-byte limit even with a full-length uuid id", async () => {
+  const store = createInMemoryStore();
+  await store.addChecklistItem("open", "Зал чистый", false);
+  const rows = await checklistOpenConfig.listRows(store);
+  const keyboard = renderListEditorKeyboard(checklistOpenConfig.key, rows);
+  const deleteCallbackData = keyboard.inline_keyboard[0][1].callback_data;
+  assertEquals(new TextEncoder().encode(deleteCallbackData).length <= 64, true);
 });
 
 Deno.test("handleListEditorDone clears the add-text session so plain chat resumes", async () => {

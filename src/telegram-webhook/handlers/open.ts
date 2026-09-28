@@ -91,7 +91,7 @@ export async function handleOpenCashAmount(
   const shift = await store.getShiftById(shiftId);
   if (!shift) return;
 
-  const previous = await store.getPreviousShift(employee.id, shift.shiftDate);
+  const previous = await store.getPreviousClosedShift(shift.shiftDate);
   const expected = previous?.closingFloatAmount ?? null;
   const discrepancy = expected === null ? null : Math.round((amount - expected) * 100) / 100;
 

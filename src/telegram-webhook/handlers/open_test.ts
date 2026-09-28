@@ -155,3 +155,38 @@ Deno.test("the first-ever shift for an employee opens cleanly with no previous s
   assertEquals(updated?.cashDiscrepancy, null);
   assertEquals(sent.some((m) => m.text.includes("⚠️")), false);
 });
+
+Deno.test("an empty pending shift row (created ahead of time by the cron for a day nobody worked) does not mask the real previous close", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Анна");
+  // Two days ago: a real closed shift with a float amount.
+  const twoDaysAgo = todayDateKey(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
+  const realPrevious = await store.createShift(employee.id, twoDaysAgo);
+  await store.updateShift(realPrevious.id, { status: "closed", closingFloatAmount: 3000 });
+  // Yesterday: the cron already pre-created a shift row for the day (pending, never opened, no float).
+  await store.createShift(employee.id, yesterdayDateKey());
+  const shift = await store.createShift(employee.id, todayDateKey());
+  const { client, sent } = fakeTelegram();
+
+  await handleOpenCashAmount(store, client, openMessage(1, "3000"), shift.id);
+
+  const updated = await store.getShiftById(shift.id);
+  assertEquals(updated?.cashDiscrepancy, 0); // compared against the real 3000 close, not against null
+  assertEquals(sent.some((m) => m.text.includes("⚠️")), false);
+});
+
+Deno.test("the comparison baseline is the venue's last close, even if a different employee closed it", async () => {
+  const store = createInMemoryStore();
+  const anna = await store.addEmployee(1, "Анна");
+  const maria = await store.addEmployee(2, "Мария");
+  const yesterday = await store.createShift(maria.id, yesterdayDateKey());
+  await store.updateShift(yesterday.id, { status: "closed", closingFloatAmount: 3500 });
+  const shift = await store.createShift(anna.id, todayDateKey());
+  const { client, sent } = fakeTelegram();
+
+  await handleOpenCashAmount(store, client, openMessage(1, "3000"), shift.id);
+
+  const updated = await store.getShiftById(shift.id);
+  assertEquals(updated?.cashDiscrepancy, -500);
+  assertEquals(sent.some((m) => m.text.includes("⚠️")), true);
+});

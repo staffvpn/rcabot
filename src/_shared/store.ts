@@ -104,7 +104,12 @@ export interface Store {
   getShiftById(id: string): Promise<Shift | null>;
   createShift(employeeId: string, shiftDate: string): Promise<Shift>;
   updateShift(id: string, patch: Partial<Shift>): Promise<Shift>;
-  getPreviousShift(employeeId: string, beforeDate: string): Promise<Shift | null>;
+  /**
+   * The most recent shift (any employee — single venue, shared cash drawer) closed before
+   * `beforeDate`, i.e. one with `closingFloatAmount` actually set. Pending rows the cron
+   * pre-creates for unworked days must never be returned here — they'd mask the real baseline.
+   */
+  getPreviousClosedShift(beforeDate: string): Promise<Shift | null>;
   listShiftsForDate(shiftDate: string): Promise<Shift[]>;
 
   getChecklistProgress(shiftId: string): Promise<ChecklistProgress[]>;
@@ -273,9 +278,9 @@ export function createInMemoryStore(): Store {
       shifts.set(id, updated);
       return updated;
     },
-    async getPreviousShift(employeeId, beforeDate) {
+    async getPreviousClosedShift(beforeDate) {
       const candidates = [...shifts.values()]
-        .filter((s) => s.employeeId === employeeId && s.shiftDate < beforeDate)
+        .filter((s) => s.shiftDate < beforeDate && s.closingFloatAmount !== null)
         .sort((a, b) => (a.shiftDate < b.shiftDate ? 1 : -1));
       return candidates[0] ?? null;
     },

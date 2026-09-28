@@ -12,13 +12,31 @@ export interface TelegramUser {
   username?: string;
 }
 
+export interface MessageOriginUser {
+  type: "user";
+  sender_user: TelegramUser;
+}
+
+export interface MessageOriginHiddenUser {
+  type: "hidden_user";
+  sender_user_name: string;
+}
+
+export interface MessageOriginOther {
+  type: "chat" | "channel";
+}
+
+export type MessageOrigin = MessageOriginUser | MessageOriginHiddenUser | MessageOriginOther;
+
 export interface TelegramMessage {
   message_id: number;
   from: TelegramUser;
   chat: { id: number };
   text?: string;
   photo?: { file_id: string }[];
+  /** @deprecated replaced by forward_origin in Bot API 7.0; kept only as a fallback for old clients/fixtures */
   forward_from?: TelegramUser;
+  forward_origin?: MessageOrigin;
 }
 
 export interface TelegramCallbackQuery {

@@ -15,14 +15,24 @@ export interface PeopleEditorConfig {
 }
 
 export function extractForwardedUser(message: TelegramMessage): { telegramId: number; fullName: string } | null {
-  if (!message.forward_from) return null;
-  return { telegramId: message.forward_from.id, fullName: message.forward_from.first_name };
+  const origin = message.forward_origin;
+  if (origin?.type === "user") {
+    return { telegramId: origin.sender_user.id, fullName: origin.sender_user.first_name };
+  }
+  // forward_from is deprecated (replaced by forward_origin in Bot API 7.0) but kept as a fallback.
+  if (message.forward_from) {
+    return { telegramId: message.forward_from.id, fullName: message.forward_from.first_name };
+  }
+  return null;
 }
 
 function renderPeopleKeyboard(key: string, rows: PeopleRow[]): InlineKeyboard {
-  const itemRows = rows.map((r) => [
+  // The row's position (not its id) goes in callback_data: Telegram caps callback_data at 64 bytes,
+  // and `admin:people:${key}:del:${uuid}` can exceed that for longer keys. handlePeopleDelete
+  // resolves the index back against a freshly-read list.
+  const itemRows = rows.map((r, index) => [
     { text: r.label, callback_data: "noop" },
-    { text: "🗑", callback_data: `admin:people:${key}:del:${r.id}` },
+    { text: "🗑", callback_data: `admin:people:${key}:del:${index}` },
   ]);
   return {
     inline_keyboard: [
@@ -63,6 +73,14 @@ export async function handlePeopleForward(
   message: TelegramMessage,
   config: PeopleEditorConfig,
 ): Promise<void> {
+  if (message.forward_origin?.type === "hidden_user") {
+    await telegram.sendMessage(
+      message.chat.id,
+      "У этого человека скрыт отправитель при пересылке — Telegram не передаёт его ID. Попросите его открыть Настройки → Конфиденциальность → Пересылка сообщений, разрешить показ отправителя и переслать сообщение ещё раз.",
+    );
+    return;
+  }
+
   const forwarded = extractForwardedUser(message);
   if (!forwarded) {
     await telegram.sendMessage(message.chat.id, "Это не похоже на пересланное сообщение. Перешлите сюда сообщение от нужного человека.");
@@ -81,10 +99,17 @@ export async function handlePeopleDelete(
   telegram: TelegramClient,
   callbackQuery: TelegramCallbackQuery,
   config: PeopleEditorConfig,
-  id: string,
+  indexStr: string,
 ): Promise<void> {
+  const before = await config.listRows(store);
+  const target = before[Number(indexStr)];
+  if (!target) {
+    await telegram.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+
   try {
-    await config.remove(store, id);
+    await config.remove(store, target.id);
   } catch (err) {
     await telegram.answerCallbackQuery(callbackQuery.id, err instanceof Error ? err.message : "Не удалось удалить.");
     return;

@@ -176,10 +176,10 @@ export function createD1Store(db: D1Database): Store {
       }
       return (await this.getShiftById(id))!;
     },
-    async getPreviousShift(employeeId, beforeDate) {
+    async getPreviousClosedShift(beforeDate) {
       const row = await first(
-        "select * from shifts where employee_id = ? and shift_date < ? order by shift_date desc limit 1",
-        employeeId, beforeDate,
+        "select * from shifts where shift_date < ? and closing_float_amount is not null order by shift_date desc limit 1",
+        beforeDate,
       );
       return row ? toShift(row) : null;
     },

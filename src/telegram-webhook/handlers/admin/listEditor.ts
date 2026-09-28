@@ -15,9 +15,12 @@ export interface ListEditorConfig {
 }
 
 export function renderListEditorKeyboard(key: string, rows: ListEditorRow[]): InlineKeyboard {
-  const itemRows = rows.map((r) => [
+  // The row's position (not its id) goes in callback_data: Telegram caps callback_data at 64 bytes,
+  // and `admin:list:checklist_open:del:${uuid}` (33+ bytes) exceeds that. handleListEditorDelete
+  // resolves the index back against a freshly-read list.
+  const itemRows = rows.map((r, index) => [
     { text: r.label, callback_data: "noop" },
-    { text: "🗑", callback_data: `admin:list:${key}:del:${r.id}` },
+    { text: "🗑", callback_data: `admin:list:${key}:del:${index}` },
   ]);
   return { inline_keyboard: [...itemRows, [{ text: "✅ Готово", callback_data: `admin:list:${key}:done` }]] };
 }
@@ -54,9 +57,16 @@ export async function handleListEditorDelete(
   telegram: TelegramClient,
   callbackQuery: TelegramCallbackQuery,
   config: ListEditorConfig,
-  id: string,
+  indexStr: string,
 ): Promise<void> {
-  await config.remove(store, id);
+  const before = await config.listRows(store);
+  const target = before[Number(indexStr)];
+  if (!target) {
+    await telegram.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+
+  await config.remove(store, target.id);
   const rows = await config.listRows(store);
   await telegram.editMessageReplyMarkup(
     callbackQuery.message.chat.id,
