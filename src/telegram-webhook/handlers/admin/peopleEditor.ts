@@ -67,7 +67,7 @@ export async function handlePeopleAddStart(
   await telegram.answerCallbackQuery(callbackQuery.id);
   await sendEphemeral(
     store, telegram, callbackQuery.from.id, callbackQuery.message.chat.id,
-    "Попросите нового человека написать боту /start, затем перешлите сюда любое его сообщение — бот возьмёт из него Telegram.",
+    "Если человек уже писал этому боту — пришлите его @username. Если нет — попросите сначала написать боту /start, а затем пришлите @username или перешлите сюда любое его сообщение.",
   );
 }
 
@@ -86,18 +86,35 @@ export async function handlePeopleForward(
   }
 
   const forwarded = extractForwardedUser(message);
-  if (!forwarded) {
-    await sendEphemeral(store, telegram, message.from.id, message.chat.id, "Это не похоже на пересланное сообщение. Перешлите сюда сообщение от нужного человека.");
+  const text = (message.text ?? "").trim();
+
+  let resolved = forwarded;
+  if (!resolved && text.startsWith("@")) {
+    resolved = await telegram.getChatByUsername(text);
+    if (!resolved) {
+      await sendEphemeral(
+        store, telegram, message.from.id, message.chat.id,
+        "Не нашёл этого пользователя — скорее всего, он ни разу не писал боту. Попросите его сначала отправить боту /start, затем пришлите @username ещё раз (или перешлите сюда любое его сообщение).",
+      );
+      return;
+    }
+  }
+
+  if (!resolved) {
+    await sendEphemeral(
+      store, telegram, message.from.id, message.chat.id,
+      "Это не похоже на пересланное сообщение или @username. Перешлите сюда сообщение от нужного человека либо пришлите его @username.",
+    );
     return;
   }
 
-  await config.add(store, forwarded.telegramId, forwarded.fullName);
+  await config.add(store, resolved.telegramId, resolved.fullName);
   await store.clearSession(message.from.id);
 
   // One message, not two — sendEphemeral would otherwise delete the confirmation the instant
   // the re-opened editor is sent right after it, so the admin would never see it.
   const rows = await config.listRows(store);
-  await sendEphemeral(store, telegram, message.from.id, message.chat.id, `Добавлен(а) ✅ ${forwarded.fullName}`, {
+  await sendEphemeral(store, telegram, message.from.id, message.chat.id, `Добавлен(а) ✅ ${resolved.fullName}`, {
     replyMarkup: renderPeopleKeyboard(config.key, rows),
   });
 }

@@ -65,11 +65,22 @@ export interface SentMessage {
   messageId: number;
 }
 
+export interface ResolvedChat {
+  telegramId: number;
+  fullName: string;
+}
+
 export interface TelegramClient {
   sendMessage(chatId: number, text: string, opts?: SendMessageOptions): Promise<SentMessage>;
   sendPhoto(chatId: number, fileId: string, caption?: string): Promise<void>;
   /** Best-effort: swallows failures (message already gone, too old, etc.) instead of throwing. */
   deleteMessage(chatId: number, messageId: number): Promise<void>;
+  /**
+   * Resolves a public @username to their id — only works if that person has messaged this bot
+   * at least once (Telegram doesn't let bots resolve arbitrary usernames otherwise). Returns
+   * null on any failure, or if the username belongs to something other than a private chat.
+   */
+  getChatByUsername(username: string): Promise<ResolvedChat | null>;
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
   editMessageReplyMarkup(chatId: number, messageId: number, markup: InlineKeyboard): Promise<void>;
   setWebhook(url: string, secretToken: string): Promise<void>;
@@ -107,6 +118,18 @@ export function createTelegramClient(
         await call("deleteMessage", { chat_id: chatId, message_id: messageId });
       } catch (err) {
         console.error("deleteMessage: best-effort cleanup failed", err);
+      }
+    },
+    async getChatByUsername(username) {
+      const handle = username.startsWith("@") ? username : `@${username}`;
+      try {
+        const data = (await call("getChat", { chat_id: handle })) as {
+          result: { id: number; type: string; first_name?: string };
+        };
+        if (data.result.type !== "private") return null;
+        return { telegramId: data.result.id, fullName: data.result.first_name || handle };
+      } catch {
+        return null;
       }
     },
     async answerCallbackQuery(callbackQueryId, text) {
