@@ -49,6 +49,21 @@ Deno.test("CLOSER when the shift is already closed today tells the employee, not
   assertEquals(sent, [{ chatId: 1, text: "Смена уже закрыта.", replyMarkup: undefined }]);
 });
 
+Deno.test("CLOSER with zero configured close-checklist items skips the checklist entirely and asks for the closing float directly", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Анна");
+  const shift = await store.createShift(employee.id, todayDateKey());
+  await store.updateShift(shift.id, { status: "open" });
+  const { client, sent } = fakeTelegram();
+
+  await handleCloserButton(store, client, msg(1, "🔴 CLOSER"));
+
+  assertEquals(sent.some((m) => m.text.includes("Перед закрытием")), false);
+  assertEquals(sent.some((m) => m.text.includes("Сколько наличных")), true);
+  assertEquals((await store.getSession(1)).state, "awaiting_closing_float");
+  assertEquals((await store.getSession(1)).data, { shiftId: shift.id });
+});
+
 Deno.test("CLOSER on an open shift shows the closing checklist", async () => {
   const store = createInMemoryStore();
   const employee = await store.addEmployee(1, "Анна");

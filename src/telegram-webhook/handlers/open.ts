@@ -27,8 +27,16 @@ export async function handleOpenButton(
 
   const shift = existing ?? (await store.createShift(employee.id, today));
   const items = await store.listChecklistItems("open");
-  const progress = await store.getChecklistProgress(shift.id);
 
+  if (items.length === 0) {
+    // No open-checklist items configured — there is nothing to tick off, so don't show an
+    // empty keyboard with no button to press. Go straight to the cash-amount question.
+    await store.setSession(message.from.id, "awaiting_open_cash", { shiftId: shift.id });
+    await telegram.sendMessage(message.chat.id, "Введите сумму наличных в кассе (размен).");
+    return;
+  }
+
+  const progress = await store.getChecklistProgress(shift.id);
   await telegram.sendMessage(message.chat.id, "Перед открытием отметьте пункты:", {
     replyMarkup: renderChecklistKeyboard(items, progress),
   });

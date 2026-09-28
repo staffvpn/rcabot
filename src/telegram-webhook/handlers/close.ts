@@ -27,6 +27,15 @@ export async function handleCloserButton(
   }
 
   const items = await store.listChecklistItems("close");
+
+  if (items.length === 0) {
+    // No close-checklist items configured — there is nothing to tick off, so don't show an
+    // empty keyboard with no button to press. Go straight to the closing-float question.
+    await store.setSession(message.from.id, "awaiting_closing_float", { shiftId: shift.id });
+    await telegram.sendMessage(message.chat.id, "Сколько наличных (размена) оставляете в кассе для следующей смены?");
+    return;
+  }
+
   const progress = await store.getChecklistProgress(shift.id);
   await telegram.sendMessage(message.chat.id, "Перед закрытием отметьте пункты:", {
     replyMarkup: renderChecklistKeyboard(items, progress),
@@ -81,7 +90,7 @@ export async function handleCloseChecklistToggle(
   );
   await telegram.answerCallbackQuery(callbackQuery.id);
 
-  await maybeAskClosingFloat(store, telegram, callbackQuery.message.chat.id, callbackQuery.from.id, items, updatedProgress);
+  await maybeAskClosingFloat(store, telegram, callbackQuery.message.chat.id, callbackQuery.from.id, shift.id, items, updatedProgress);
 }
 
 export async function handleClosePhoto(
@@ -106,7 +115,7 @@ export async function handleClosePhoto(
 
   await telegram.editMessageReplyMarkup(data.chatId, data.messageId, renderChecklistKeyboard(items, progress));
 
-  await maybeAskClosingFloat(store, telegram, message.chat.id, message.from.id, items, progress);
+  await maybeAskClosingFloat(store, telegram, message.chat.id, message.from.id, data.shiftId, items, progress);
 }
 
 async function maybeAskClosingFloat(
@@ -114,11 +123,11 @@ async function maybeAskClosingFloat(
   telegram: TelegramClient,
   chatId: number,
   telegramId: number,
+  shiftId: string,
   items: ChecklistItem[],
   progress: ChecklistProgress[],
 ): Promise<void> {
   if (!isChecklistComplete(items, progress)) return;
-  const shiftId = progress[0].shiftId;
   await store.setSession(telegramId, "awaiting_closing_float", { shiftId });
   await telegram.sendMessage(chatId, "Сколько наличных (размена) оставляете в кассе для следующей смены?");
 }

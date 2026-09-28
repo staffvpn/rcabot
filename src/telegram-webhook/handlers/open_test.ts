@@ -54,6 +54,18 @@ Deno.test("OPEN with an already-closed shift today refuses to reopen it", async 
   assertEquals(sent, [{ chatId: 1, text: "Смена на сегодня уже закрыта.", replyMarkup: undefined }]);
 });
 
+Deno.test("OPEN with zero configured open-checklist items skips the checklist entirely and asks for cash directly", async () => {
+  const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
+  const { client, sent } = fakeTelegram();
+
+  await handleOpenButton(store, client, openMessage(1, "🟢 OPEN"));
+
+  assertEquals(sent.some((m) => m.text.includes("Перед открытием")), false);
+  assertEquals(sent.some((m) => m.text.includes("сумму наличных")), true);
+  assertEquals((await store.getSession(1)).state, "awaiting_open_cash");
+});
+
 Deno.test("OPEN with no shift yet creates one and shows the checklist", async () => {
   const store = createInMemoryStore();
   const employee = await store.addEmployee(1, "Анна");
