@@ -10,7 +10,7 @@ Deno.test("notifyAdmins sends the same text to every admin", async () => {
   const sent: number[] = [];
   const telegram: TelegramClient = {
     async sendMessage(chatId) { sent.push(chatId); return { messageId: 1 }; },
-    async sendPhoto() {}, async deleteMessage() {}, async getChatByUsername() { return null; }, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
+    async sendPhoto() {}, async deleteMessage() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
   };
 
   await notifyAdmins(store, telegram, "hello");
@@ -23,7 +23,7 @@ Deno.test("notifyAdmins is a no-op when there are no admins yet", async () => {
   const sent: number[] = [];
   const telegram: TelegramClient = {
     async sendMessage(chatId) { sent.push(chatId); return { messageId: 1 }; },
-    async sendPhoto() {}, async deleteMessage() {}, async getChatByUsername() { return null; }, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
+    async sendPhoto() {}, async deleteMessage() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
   };
 
   await notifyAdmins(store, telegram, "hello");
@@ -42,7 +42,7 @@ Deno.test("notifyAdmins does not throw when one admin is unreachable, and still 
       sent.push(chatId);
       return { messageId: 1 };
     },
-    async sendPhoto() {}, async deleteMessage() {}, async getChatByUsername() { return null; }, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
+    async sendPhoto() {}, async deleteMessage() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
   };
 
   await notifyAdmins(store, telegram, "hello"); // must not reject

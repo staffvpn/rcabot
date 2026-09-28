@@ -1,12 +1,12 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { createInMemoryStore } from "../../../_shared/store.ts";
-import type { ResolvedChat, TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
+import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
 import {
   adminsConfig, employeesConfig, extractForwardedUser,
   handlePeopleAddStart, handlePeopleDelete, handlePeopleDone, handlePeopleForward, openPeopleEditor,
 } from "./peopleEditor.ts";
 
-function fakeTelegram(resolveUsername: (username: string) => ResolvedChat | null = () => null) {
+function fakeTelegram() {
   const sent: { chatId: number; text: string; replyMarkup?: unknown }[] = [];
   const edited: { chatId: number; messageId: number; markup: unknown }[] = [];
   const answered: { id: string; text?: string }[] = [];
@@ -15,16 +15,11 @@ function fakeTelegram(resolveUsername: (username: string) => ResolvedChat | null
     async sendMessage(chatId, text, opts) { sent.push({ chatId, text, replyMarkup: opts?.replyMarkup }); return { messageId: sent.length }; },
     async sendPhoto() {},
     async deleteMessage(chatId, messageId) { deleted.push({ chatId, messageId }); },
-    async getChatByUsername(username) { return resolveUsername(username); },
     async answerCallbackQuery(id, text) { answered.push({ id, text }); },
     async editMessageReplyMarkup(chatId, messageId, markup) { edited.push({ chatId, messageId, markup }); },
     async setWebhook() {},
   };
   return { client, sent, edited, answered, deleted };
-}
-
-function usernameMsg(fromId: number, username: string): TelegramMessage {
-  return { message_id: 1, from: { id: fromId, first_name: "RCA" }, chat: { id: fromId }, text: username };
 }
 
 function forwardedMsg(fromId: number, forwardFromId?: number): TelegramMessage {
@@ -138,7 +133,7 @@ Deno.test("handlePeopleAddStart starts the forward-capture session and explains 
   assertEquals(sent[0].text.includes("администратора"), false); // this prompt is shared with employeesConfig — wording must stay generic
 });
 
-Deno.test("a non-forwarded, non-@username message while adding is rejected without creating anyone", async () => {
+Deno.test("a non-forwarded message while adding is rejected without creating anyone", async () => {
   const store = createInMemoryStore();
   const { client, sent } = fakeTelegram();
 
@@ -146,30 +141,6 @@ Deno.test("a non-forwarded, non-@username message while adding is rejected witho
 
   assertEquals((await store.listEmployees()).length, 0);
   assertEquals(sent[0].text.includes("не похоже на пересланное"), true);
-});
-
-Deno.test("sending an @username that Telegram can resolve adds the person directly, no forward needed", async () => {
-  const store = createInMemoryStore();
-  const { client, sent } = fakeTelegram((username) =>
-    username === "@annet_d" ? { telegramId: 555, fullName: "Аня" } : null
-  );
-
-  await handlePeopleForward(store, client, usernameMsg(1, "@annet_d"), employeesConfig);
-
-  const employees = await store.listEmployees();
-  assertEquals(employees[0].telegramId, 555);
-  assertEquals(employees[0].fullName, "Аня");
-  assertEquals(sent.some((m) => m.text.includes("Добавлен")), true);
-});
-
-Deno.test("an @username Telegram can't resolve (never messaged the bot) gets a clear error, no one added", async () => {
-  const store = createInMemoryStore();
-  const { client, sent } = fakeTelegram(() => null);
-
-  await handlePeopleForward(store, client, usernameMsg(1, "@nobody"), employeesConfig);
-
-  assertEquals((await store.listEmployees()).length, 0);
-  assertEquals(sent[0].text.includes("ни разу не писал боту"), true);
 });
 
 Deno.test("forwarding a message adds the employee, confirms, and re-opens the list", async () => {

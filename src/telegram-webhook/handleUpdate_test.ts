@@ -9,7 +9,7 @@ function fakeTelegram() {
   const client: TelegramClient = {
     async sendMessage(chatId, text) { sent.push({ chatId, text }); return { messageId: sent.length }; },
     async sendPhoto() {},
-    async deleteMessage() {}, async getChatByUsername() { return null; },
+    async deleteMessage() {},
     async answerCallbackQuery(id, text) { answered.push({ id, text }); },
     async editMessageReplyMarkup() {},
     async setWebhook() {},

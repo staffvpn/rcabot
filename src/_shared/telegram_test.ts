@@ -93,56 +93,6 @@ Deno.test("deleteMessage swallows failures instead of throwing — cleanup is be
   await client.deleteMessage(1, 42); // must not reject
 });
 
-Deno.test("getChatByUsername resolves a private chat's id and first name", async () => {
-  const calls: { url: string; body: unknown }[] = [];
-  const fakeFetch: typeof fetch = async (input, init) => {
-    calls.push({ url: input.toString(), body: JSON.parse(init!.body as string) });
-    return new Response(
-      JSON.stringify({ ok: true, result: { id: 555, type: "private", first_name: "Аня", username: "annet_d" } }),
-      { status: 200 },
-    );
-  };
-
-  const client = createTelegramClient("TEST_TOKEN", fakeFetch);
-  const result = await client.getChatByUsername("@annet_d");
-
-  assertEquals(calls[0].url, "https://api.telegram.org/botTEST_TOKEN/getChat");
-  assertEquals(calls[0].body, { chat_id: "@annet_d" });
-  assertEquals(result, { telegramId: 555, fullName: "Аня" });
-});
-
-Deno.test("getChatByUsername strips a missing leading @ before calling the API", async () => {
-  const calls: { body: unknown }[] = [];
-  const fakeFetch: typeof fetch = async (_input, init) => {
-    calls.push({ body: JSON.parse(init!.body as string) });
-    return new Response(JSON.stringify({ ok: true, result: { id: 1, type: "private", first_name: "X" } }), { status: 200 });
-  };
-
-  const client = createTelegramClient("TEST_TOKEN", fakeFetch);
-  await client.getChatByUsername("annet_d");
-
-  assertEquals(calls[0].body, { chat_id: "@annet_d" });
-});
-
-Deno.test("getChatByUsername returns null instead of throwing when Telegram can't find the chat", async () => {
-  const fakeFetch: typeof fetch = async () => new Response("Bad Request: chat not found", { status: 400 });
-  const client = createTelegramClient("TEST_TOKEN", fakeFetch);
-
-  const result = await client.getChatByUsername("@nobody"); // must not reject
-
-  assertEquals(result, null);
-});
-
-Deno.test("getChatByUsername returns null for a non-private chat (e.g. a channel username)", async () => {
-  const fakeFetch: typeof fetch = async () =>
-    new Response(JSON.stringify({ ok: true, result: { id: -100, type: "channel", first_name: "" } }), { status: 200 });
-  const client = createTelegramClient("TEST_TOKEN", fakeFetch);
-
-  const result = await client.getChatByUsername("@somechannel");
-
-  assertEquals(result, null);
-});
-
 Deno.test("editMessageReplyMarkup posts chat id, message id, and the new markup", async () => {
   const calls: { body: Record<string, unknown> }[] = [];
   const fakeFetch: typeof fetch = async (_input, init) => {
