@@ -12,8 +12,19 @@ function fakeTelegram() {
   return { client, sent };
 }
 
+Deno.test("a stranger (not a registered employee or admin) gets no response from the instructions menu", async () => {
+  const store = createInMemoryStore();
+  await store.addInstruction("Возврат чека (наличные)", "1. Откройте Настройки...", null);
+  const { client, sent } = fakeTelegram();
+
+  await handleInstructionsMenu(store, client, { message_id: 1, from: { id: 999, first_name: "Чужой" }, chat: { id: 999 }, text: "📖 Инструкции" });
+
+  assertEquals(sent, []);
+});
+
 Deno.test("the instructions menu tells the employee when nothing has been added yet", async () => {
   const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
   const { client, sent } = fakeTelegram();
 
   await handleInstructionsMenu(store, client, { message_id: 1, from: { id: 1, first_name: "Анна" }, chat: { id: 1 }, text: "📖 Инструкции" });
@@ -23,6 +34,7 @@ Deno.test("the instructions menu tells the employee when nothing has been added 
 
 Deno.test("the instructions menu lists one button per article", async () => {
   const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
   const article = await store.addInstruction("Возврат чека (наличные)", "1. Откройте Настройки...", null);
   const { client, sent } = fakeTelegram();
 

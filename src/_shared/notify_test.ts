@@ -30,3 +30,21 @@ Deno.test("notifyAdmins is a no-op when there are no admins yet", async () => {
 
   assertEquals(sent, []);
 });
+
+Deno.test("notifyAdmins does not throw when one admin is unreachable, and still messages the rest", async () => {
+  const store = createInMemoryStore();
+  await store.addAdmin(1, "Заблокировал бота");
+  await store.addAdmin(2, "Работает");
+  const sent: number[] = [];
+  const telegram: TelegramClient = {
+    async sendMessage(chatId) {
+      if (chatId === 1) throw new Error("Forbidden: bot can't initiate conversation with a user");
+      sent.push(chatId);
+    },
+    async sendPhoto() {}, async answerCallbackQuery() {}, async editMessageReplyMarkup() {}, async setWebhook() {},
+  };
+
+  await notifyAdmins(store, telegram, "hello"); // must not reject
+
+  assertEquals(sent, [2]);
+});

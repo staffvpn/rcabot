@@ -6,6 +6,10 @@ export async function handleInstructionsMenu(
   telegram: TelegramClient,
   message: TelegramMessage,
 ): Promise<void> {
+  const employee = await store.getEmployeeByTelegramId(message.from.id);
+  const admin = employee ? null : await store.getAdminByTelegramId(message.from.id);
+  if (!employee && !admin) return;
+
   const articles = await store.listInstructions();
   if (articles.length === 0) {
     await telegram.sendMessage(message.chat.id, "Инструкции пока не добавлены.");

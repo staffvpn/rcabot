@@ -20,11 +20,11 @@ export default {
       return new Response("forbidden", { status: 403 });
     }
 
-    const update = (await request.json()) as TelegramUpdate;
     const store = createD1Store(env.DB);
     const telegram = createTelegramClient(env.TELEGRAM_BOT_TOKEN);
 
     try {
+      const update = (await request.json()) as TelegramUpdate;
       await handleUpdate(store, telegram, update);
     } catch (err) {
       console.error("handleUpdate failed", err);

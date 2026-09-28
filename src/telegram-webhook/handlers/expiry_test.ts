@@ -16,8 +16,19 @@ function msg(): TelegramMessage {
   return { message_id: 1, from: { id: 1, first_name: "Анна" }, chat: { id: 1 }, text: "🍰 Сроки годности" };
 }
 
+Deno.test("a stranger (not a registered employee or admin) gets no response from the expiry list", async () => {
+  const store = createInMemoryStore();
+  await store.addExpiryItem("Канеле", 2);
+  const { client, sent } = fakeTelegram();
+
+  await handleExpiryList(store, client, { message_id: 1, from: { id: 999, first_name: "Чужой" }, chat: { id: 999 }, text: "🍰 Сроки годности" });
+
+  assertEquals(sent, []);
+});
+
 Deno.test("an empty expiry list says so instead of sending a blank list", async () => {
   const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
   const { client, sent } = fakeTelegram();
 
   await handleExpiryList(store, client, msg());
@@ -27,6 +38,7 @@ Deno.test("an empty expiry list says so instead of sending a blank list", async 
 
 Deno.test("the expiry list is formatted as one 'name — N суток' line per item, in position order, with the supplier reference link appended", async () => {
   const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
   await store.addExpiryItem("Канеле", 2);
   await store.addExpiryItem("Чизкейк", 3);
   const { client, sent } = fakeTelegram();

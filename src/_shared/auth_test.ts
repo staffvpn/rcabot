@@ -14,7 +14,7 @@ Deno.test("isAuthorized rejects the request when the secret header is missing or
   assertEquals(isAuthorized(wrongHeader, "s3cret"), false);
 });
 
-Deno.test("isAuthorized allows any request when no secret is configured", () => {
+Deno.test("isAuthorized fails closed — rejects every request when no secret is configured", () => {
   const req = new Request("https://example.com");
-  assertEquals(isAuthorized(req, undefined), true);
+  assertEquals(isAuthorized(req, undefined), false);
 });

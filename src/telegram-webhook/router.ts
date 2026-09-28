@@ -18,6 +18,19 @@ export async function handleMessage(
   telegram: TelegramClient,
   message: TelegramMessage,
 ): Promise<void> {
+  // /start and /admin are entry points and must always work, even if the user is stuck mid-flow
+  // (e.g. the bot is waiting for a cash amount and they lost their place) — never trap them behind
+  // a session state with no way out.
+  if (message.text === "/start" || message.text === "/admin") {
+    await store.clearSession(message.from.id);
+    if (message.text === "/start") {
+      await handleStart(store, telegram, message);
+    } else {
+      await handleAdminEntry(store, telegram, message);
+    }
+    return;
+  }
+
   const session = await store.getSession(message.from.id);
 
   if (session.state === "awaiting_open_cash") {
@@ -65,10 +78,6 @@ export async function handleMessage(
     return;
   }
 
-  if (message.text === "/start") {
-    await handleStart(store, telegram, message);
-    return;
-  }
   if (message.text === "🟢 OPEN") {
     await handleOpenButton(store, telegram, message);
     return;
@@ -89,10 +98,5 @@ export async function handleMessage(
     await handleExpiryList(store, telegram, message);
     return;
   }
-  if (message.text === "/admin") {
-    await handleAdminEntry(store, telegram, message);
-    return;
-  }
-
   await telegram.sendMessage(message.chat.id, UNKNOWN_COMMAND_TEXT);
 }

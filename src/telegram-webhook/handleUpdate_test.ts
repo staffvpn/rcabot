@@ -67,6 +67,37 @@ Deno.test("the OPEN button is routed to the open-shift handler, not the fallback
   assertEquals(sent.some((m) => m.text.includes("Не понимаю")), false);
 });
 
+Deno.test("/start escapes a stuck session state instead of being swallowed as its input", async () => {
+  const store = createInMemoryStore();
+  await store.addEmployee(1, "Анна");
+  await store.setSession(1, "awaiting_open_cash", { shiftId: "some-shift" });
+  const { client, sent } = fakeTelegram();
+  const update: TelegramUpdate = {
+    update_id: 6,
+    message: { message_id: 1, from: { id: 1, first_name: "Анна" }, chat: { id: 1 }, text: "/start" },
+  };
+
+  await handleUpdate(store, client, update);
+
+  assertEquals(sent.some((m) => m.text.includes("С возвращением")), true);
+  assertEquals(sent.some((m) => m.text.includes("Не понял сумму")), false);
+});
+
+Deno.test("/admin escapes a stuck session state instead of being swallowed as its input", async () => {
+  const store = createInMemoryStore();
+  await store.addAdmin(1, "Мария");
+  await store.setSession(1, "awaiting_close_photo");
+  const { client, sent } = fakeTelegram();
+  const update: TelegramUpdate = {
+    update_id: 7,
+    message: { message_id: 1, from: { id: 1, first_name: "Мария" }, chat: { id: 1 }, text: "/admin" },
+  };
+
+  await handleUpdate(store, client, update);
+
+  assertEquals(sent.some((m) => m.text.includes("Панель администратора")), true);
+});
+
 Deno.test("a non-admin tapping an admin: callback is silently rejected, no menu leaks", async () => {
   const store = createInMemoryStore();
   await store.addEmployee(1, "Анна"); // registered, but not an admin

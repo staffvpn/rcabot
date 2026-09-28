@@ -17,6 +17,11 @@ export async function runCronTick(
 
   const employees = (await store.listEmployees()).filter((e) => e.active);
 
+  // Single venue, one shared cash drawer: if nobody has opened by opening time, that's one
+  // lateness event, not one per registered employee. Every late employee's shift still gets
+  // notifiedLateAt so it never re-fires, but only the first one this tick actually pages admins.
+  let lateAlreadyNotifiedThisTick = false;
+
   for (const employee of employees) {
     let shift = await store.getShift(employee.id, dateKey);
     if (!shift) shift = await store.createShift(employee.id, dateKey);
@@ -24,6 +29,13 @@ export async function runCronTick(
 
     const actions = decideReminders(now, scheduleDay, shift);
     for (const action of actions) {
+      if (action.type === "notify_late") {
+        if (lateAlreadyNotifiedThisTick) {
+          await store.updateShift(shift.id, { notifiedLateAt: new Date().toISOString() });
+          continue;
+        }
+        lateAlreadyNotifiedThisTick = true;
+      }
       await applyAction(store, telegram, employee, shift, action, scheduleDay);
     }
   }

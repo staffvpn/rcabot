@@ -43,6 +43,19 @@ Deno.test("an employee who never opens gets exactly one lateness notice to admin
   assertEquals(lateNotices.length, 1);
 });
 
+Deno.test("two employees who both never open produce exactly one lateness notice to admins, not one per employee", async () => {
+  const store = createInMemoryStore();
+  await store.addAdmin(999, "RCA");
+  await store.addEmployee(1, "Анна");
+  await store.addEmployee(2, "Мария");
+  const { client, sent } = fakeTelegram();
+
+  await runCronTick(store, client, atVenueTime("08:30"));
+
+  const lateNotices = sent.filter((m) => m.chatId === 999 && m.text.includes("Опоздание"));
+  assertEquals(lateNotices.length, 1);
+});
+
 Deno.test("an open shift past 14:20 gets the X-report reminder with the 'Ввести отчёт' button", async () => {
   const store = createInMemoryStore();
   const employee = await store.addEmployee(1, "Анна");
