@@ -12,15 +12,16 @@ function fakeTelegram() {
   return { client, sent };
 }
 
-// 2026-09-21 is a Monday: schedule is 08:30-19:30, venue offset UTC+3.
+// 2026-09-21 is a Monday.
 function atVenueTime(hhmm: string): Date {
   const [h, m] = hhmm.split(":").map(Number);
   return new Date(Date.UTC(2026, 8, 21, h - 3, m));
 }
 
-Deno.test("an employee 9 minutes from opening gets the reminder exactly once across repeated ticks", async () => {
+Deno.test("a scheduled employee 9 minutes from their own start time gets the reminder exactly once across repeated ticks", async () => {
   const store = createInMemoryStore();
-  await store.addEmployee(1, "Анна");
+  const employee = await store.addEmployee(1, "Анна");
+  await store.upsertScheduleAssignment(employee.id, "2026-09-21", "08:30", "19:30");
   const { client, sent } = fakeTelegram();
 
   await runCronTick(store, client, atVenueTime("08:21"));
@@ -30,43 +31,34 @@ Deno.test("an employee 9 minutes from opening gets the reminder exactly once acr
   assertEquals(reminders.length, 1);
 });
 
-Deno.test("registering a new employee after someone already opened today's shift does not trigger a fresh lateness notice for them", async () => {
+Deno.test("an employee with no schedule assignment for today gets no reminder and no lateness check, even past opening time", async () => {
   const store = createInMemoryStore();
-  await store.addAdmin(999, "RCA");
-  const anna = await store.addEmployee(1, "Анна");
-  const { client } = fakeTelegram();
+  await store.addEmployee(1, "Анна"); // registered, but not scheduled for today
+  const { client, sent } = fakeTelegram();
 
-  await runCronTick(store, client, atVenueTime("08:23"));
-  await store.updateShift((await store.getShift(anna.id, "2026-09-21"))!.id, {
-    status: "open",
-    openedAt: atVenueTime("08:23").toISOString(),
-  });
+  await runCronTick(store, client, atVenueTime("08:35"));
 
-  // A new employee gets added mid-afternoon, long after Анна already opened the real shift.
-  await store.addEmployee(2, "Иван");
-  const { client: client2, sent } = fakeTelegram();
-  await runCronTick(store, client2, atVenueTime("16:16"));
-
-  assertEquals(sent.filter((m) => m.chatId === 999 && m.text.includes("Опоздание")).length, 0);
+  assertEquals(sent.filter((m) => m.chatId === 1).length, 0);
 });
 
-Deno.test("the lateness notice names no specific employee — with a shared cash drawer, we don't know who was actually due in", async () => {
+Deno.test("the lateness notice names the specific scheduled employee and their own start time", async () => {
   const store = createInMemoryStore();
   await store.addAdmin(999, "RCA");
-  await store.addEmployee(1, "Анна");
+  const employee = await store.addEmployee(1, "Вика");
+  await store.upsertScheduleAssignment(employee.id, "2026-09-21", "08:30", "14:30");
   const { client, sent } = fakeTelegram();
 
   await runCronTick(store, client, atVenueTime("08:30"));
 
   const lateNotice = sent.find((m) => m.chatId === 999 && m.text.includes("Опоздание"));
-  assertEquals(lateNotice?.text.includes("Анна"), false);
-  assertEquals(lateNotice?.text, "🔴 Опоздание: смена не открыта вовремя (по графику 08:30).");
+  assertEquals(lateNotice?.text, "🔴 Опоздание: Вика не открыл(а) смену вовремя (по графику 08:30).");
 });
 
-Deno.test("an employee who never opens gets exactly one lateness notice to admins, not one per tick", async () => {
+Deno.test("a scheduled employee who never opens gets exactly one lateness notice, not one per tick", async () => {
   const store = createInMemoryStore();
   await store.addAdmin(999, "RCA");
-  await store.addEmployee(1, "Анна");
+  const employee = await store.addEmployee(1, "Анна");
+  await store.upsertScheduleAssignment(employee.id, "2026-09-21", "08:30", "19:30");
   const { client, sent } = fakeTelegram();
 
   await runCronTick(store, client, atVenueTime("08:30"));
@@ -76,22 +68,28 @@ Deno.test("an employee who never opens gets exactly one lateness notice to admin
   assertEquals(lateNotices.length, 1);
 });
 
-Deno.test("two employees who both never open produce exactly one lateness notice to admins, not one per employee", async () => {
+Deno.test("two employees scheduled the same day with different start times who are both late get two separate notices, not deduped", async () => {
   const store = createInMemoryStore();
   await store.addAdmin(999, "RCA");
-  await store.addEmployee(1, "Анна");
-  await store.addEmployee(2, "Мария");
+  const morning = await store.addEmployee(1, "Вика");
+  const afternoon = await store.addEmployee(2, "Сабина");
+  await store.upsertScheduleAssignment(morning.id, "2026-09-21", "08:30", "14:30");
+  await store.upsertScheduleAssignment(afternoon.id, "2026-09-21", "14:30", "20:00");
   const { client, sent } = fakeTelegram();
 
-  await runCronTick(store, client, atVenueTime("08:30"));
+  // Past both start times; neither has opened.
+  await runCronTick(store, client, atVenueTime("15:00"));
 
   const lateNotices = sent.filter((m) => m.chatId === 999 && m.text.includes("Опоздание"));
-  assertEquals(lateNotices.length, 1);
+  assertEquals(lateNotices.length, 2);
+  assertEquals(lateNotices.some((m) => m.text.includes("Вика")), true);
+  assertEquals(lateNotices.some((m) => m.text.includes("Сабина")), true);
 });
 
 Deno.test("an open shift past 14:20 gets the X-report reminder with the 'Ввести отчёт' button", async () => {
   const store = createInMemoryStore();
   const employee = await store.addEmployee(1, "Анна");
+  await store.upsertScheduleAssignment(employee.id, "2026-09-21", "08:30", "19:30");
   const shift = await store.createShift(employee.id, "2026-09-21");
   await store.updateShift(shift.id, { status: "open" });
   const { client, sent } = fakeTelegram();
@@ -102,10 +100,11 @@ Deno.test("an open shift past 14:20 gets the X-report reminder with the 'Вве�
   assertEquals(reminder?.replyMarkup, { inline_keyboard: [[{ text: "Ввести отчёт", callback_data: "xreport:start" }]] });
 });
 
-Deno.test("an inactive employee is skipped entirely", async () => {
+Deno.test("an inactive employee is skipped even if a schedule assignment still exists for them", async () => {
   const store = createInMemoryStore();
   const employee = await store.addEmployee(1, "Уволена");
-  await store.removeEmployee(employee.id); // no longer listed by listEmployees
+  await store.upsertScheduleAssignment(employee.id, "2026-09-21", "08:30", "19:30");
+  await store.removeEmployee(employee.id); // soft-delete; the assignment row is untouched
   const { client, sent } = fakeTelegram();
 
   await runCronTick(store, client, atVenueTime("08:30"));
@@ -116,6 +115,7 @@ Deno.test("an inactive employee is skipped entirely", async () => {
 Deno.test("a shift already closed today is left alone (no reminders re-fire after closing)", async () => {
   const store = createInMemoryStore();
   const employee = await store.addEmployee(1, "Анна");
+  await store.upsertScheduleAssignment(employee.id, "2026-09-21", "08:30", "19:30");
   const shift = await store.createShift(employee.id, "2026-09-21");
   await store.updateShift(shift.id, { status: "closed" });
   const { client, sent } = fakeTelegram();

@@ -15,37 +15,25 @@ export async function runCronTick(
   const scheduleDay = schedule.find((d) => d.weekday === weekday);
   if (!scheduleDay) return;
 
-  const employees = (await store.listEmployees()).filter((e) => e.active);
+  const assignments = await store.listScheduleAssignmentsForDate(dateKey);
+  const employees = await store.listEmployees();
+  const employeeById = new Map(employees.map((e) => [e.id, e]));
 
-  // Single venue, one shared cash drawer: once any employee has opened (or closed) today's
-  // shift, every other employee's still-pending row is moot — they're not the one working
-  // today. Without this, registering a brand-new employee any time after opening hours
-  // immediately fires a lateness notice for them, even though the real shift has been open
-  // for hours (this actually happened in production).
-  const todaysShifts = await store.listShiftsForDate(dateKey);
-  const shiftAlreadyHandledToday = todaysShifts.some((s) => s.status !== "pending");
+  for (const assignment of assignments) {
+    const employee = employeeById.get(assignment.employeeId);
+    if (!employee || !employee.active) continue;
 
-  // Single venue, one shared cash drawer: if nobody has opened by opening time, that's one
-  // lateness event, not one per registered employee. Every late employee's shift still gets
-  // notifiedLateAt so it never re-fires, but only the first one this tick actually pages admins.
-  let lateAlreadyNotifiedThisTick = false;
-
-  for (const employee of employees) {
     let shift = await store.getShift(employee.id, dateKey);
     if (!shift) shift = await store.createShift(employee.id, dateKey);
     if (shift.status === "closed") continue;
-    if (shift.status === "pending" && shiftAlreadyHandledToday) continue;
 
-    const actions = decideReminders(now, scheduleDay, shift);
+    // Each assignment's own start/end time, not the venue's general weekday hours — two
+    // people scheduled the same day can have different windows (spec 2026-09-30 §5).
+    const effectiveSchedule: ScheduleDay = { weekday, opensAt: assignment.startTime, closesAt: assignment.endTime };
+
+    const actions = decideReminders(now, effectiveSchedule, shift);
     for (const action of actions) {
-      if (action.type === "notify_late") {
-        if (lateAlreadyNotifiedThisTick) {
-          await store.updateShift(shift.id, { notifiedLateAt: new Date().toISOString() });
-          continue;
-        }
-        lateAlreadyNotifiedThisTick = true;
-      }
-      await applyAction(store, telegram, employee, shift, action, scheduleDay);
+      await applyAction(store, telegram, employee, shift, action, effectiveSchedule);
     }
   }
 }
@@ -68,13 +56,11 @@ async function applyAction(
       await store.updateShift(shift.id, { remindedOpenAt: now });
       break;
     case "notify_late":
-      // No employee name here: single venue, shared cash drawer — this fires for whichever
-      // registered employee's shift the cron happens to check first, which isn't necessarily
-      // who was actually due in. Naming them would blame the wrong person.
+      // Named again: with a real schedule, the bot now knows exactly who was due in.
       await notifyAdmins(
         store,
         telegram,
-        `🔴 Опоздание: смена не открыта вовремя (по графику ${scheduleDay.opensAt}).`,
+        `🔴 Опоздание: ${employee.fullName} не открыл(а) смену вовремя (по графику ${scheduleDay.opensAt}).`,
       );
       await store.updateShift(shift.id, { notifiedLateAt: now });
       break;
