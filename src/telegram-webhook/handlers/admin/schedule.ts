@@ -16,12 +16,12 @@ function formatDateKeyShort(dateKey: string): string {
   return `${d}.${m}`;
 }
 
-interface ScheduleRow {
+export interface ScheduleRow {
   assignment: ScheduleAssignment;
   label: string;
 }
 
-async function listUpcomingRows(store: Store, now: Date = new Date()): Promise<ScheduleRow[]> {
+export async function listUpcomingRows(store: Store, now: Date = new Date()): Promise<ScheduleRow[]> {
   const from = todayDateKey(now);
   const to = addDaysToDateKey(from, UPCOMING_WINDOW_DAYS);
   const assignments = await store.listScheduleAssignmentsBetween(from, to);
@@ -56,6 +56,12 @@ export async function openScheduleEditor(
   telegramId: number,
 ): Promise<void> {
   const rows = await listUpcomingRows(store);
+  if (rows.length === 0) {
+    await sendEphemeral(store, telegram, telegramId, chatId, "На ближайшие две недели график пуст.", {
+      replyMarkup: renderScheduleKeyboard(rows),
+    });
+    return;
+  }
   await sendEphemeral(store, telegram, telegramId, chatId, "Ближайший график:", {
     replyMarkup: renderScheduleKeyboard(rows),
   });

@@ -100,6 +100,46 @@ Deno.test("an open shift past 14:20 gets the X-report reminder with the 'Вве�
   assertEquals(reminder?.replyMarkup, { inline_keyboard: [[{ text: "Ввести отчёт", callback_data: "xreport:start" }]] });
 });
 
+Deno.test("an employee who opened a shift without a schedule assignment (covering for someone) still gets the close reminder", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Сабина"); // no schedule assignment for today at all
+  const shift = await store.createShift(employee.id, "2026-09-21");
+  await store.updateShift(shift.id, { status: "open" });
+  const { client, sent } = fakeTelegram();
+
+  await runCronTick(store, client, atVenueTime("19:20")); // 10 min before the venue's own 19:30 close
+
+  const reminder = sent.find((m) => m.chatId === 1 && m.text.includes("Через 10 минут закрытие"));
+  assertEquals(reminder !== undefined, true);
+});
+
+Deno.test("an employee who opened a shift without a schedule assignment still gets the X-report prompt past 14:20", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Сабина");
+  const shift = await store.createShift(employee.id, "2026-09-21");
+  await store.updateShift(shift.id, { status: "open" });
+  const { client, sent } = fakeTelegram();
+
+  await runCronTick(store, client, atVenueTime("14:20"));
+
+  const reminder = sent.find((m) => m.chatId === 1 && m.text.includes("контрольного X-отчёта"));
+  assertEquals(reminder?.replyMarkup, { inline_keyboard: [[{ text: "Ввести отчёт", callback_data: "xreport:start" }]] });
+});
+
+Deno.test("a shift with a schedule assignment is not double-processed by the unassigned-open-shift pass", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Анна");
+  await store.upsertScheduleAssignment(employee.id, "2026-09-21", "08:30", "19:30");
+  const shift = await store.createShift(employee.id, "2026-09-21");
+  await store.updateShift(shift.id, { status: "open" });
+  const { client, sent } = fakeTelegram();
+
+  await runCronTick(store, client, atVenueTime("19:20"));
+
+  const reminders = sent.filter((m) => m.chatId === 1 && m.text.includes("Через 10 минут закрытие"));
+  assertEquals(reminders.length, 1);
+});
+
 Deno.test("an inactive employee is skipped even if a schedule assignment still exists for them", async () => {
   const store = createInMemoryStore();
   const employee = await store.addEmployee(1, "Уволена");

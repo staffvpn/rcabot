@@ -68,7 +68,7 @@ Deno.test("admin:menu:schedule opens the schedule editor", async () => {
 
   await routeAdminCallback(store, client, cbq("admin:menu:schedule"));
 
-  assertEquals(sent[0].text, "Ближайший график:");
+  assertEquals(sent[0].text, "На ближайшие две недели график пуст.");
   assertEquals(answered.length, 1);
 });
 

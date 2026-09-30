@@ -3,7 +3,7 @@ import { createInMemoryStore } from "../../../_shared/store.ts";
 import type { TelegramCallbackQuery, TelegramClient, TelegramMessage } from "../../../_shared/telegram.ts";
 import {
   handleScheduleAddStart, handleScheduleDateText, handleScheduleDelete,
-  handleScheduleDone, handleSchedulePick, handleScheduleTimeText, openScheduleEditor,
+  handleScheduleDone, handleSchedulePick, handleScheduleTimeText, listUpcomingRows, openScheduleEditor,
 } from "./schedule.ts";
 
 function fakeTelegram() {
@@ -41,6 +41,29 @@ Deno.test("openScheduleEditor lists upcoming assignments as 'DD.MM Имя start-
   const keyboard = sent[0].replyMarkup as { inline_keyboard: { text: string; callback_data: string }[][] };
   assertEquals(keyboard.inline_keyboard[0][0].text, "30.09 Анна 08:30-14:30");
   assertEquals(keyboard.inline_keyboard.length, 3); // 1 row + Добавить + Готово
+});
+
+Deno.test("openScheduleEditor shows the exact empty-state message when nothing is scheduled in the next two weeks", async () => {
+  const store = createInMemoryStore();
+  const { client, sent } = fakeTelegram();
+
+  await openScheduleEditor(store, client, 1, 1);
+
+  assertEquals(sent[0].text, "На ближайшие две недели график пуст.");
+  const keyboard = sent[0].replyMarkup as { inline_keyboard: { text: string; callback_data: string }[][] };
+  assertEquals(keyboard.inline_keyboard.length, 2); // Добавить + Готово only, no item rows
+});
+
+Deno.test("the upcoming window is [today, today+14) — a assignment 13 days out is included, 14 days out is excluded", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Анна");
+  const now = new Date("2026-09-30T00:00:00Z");
+  await store.upsertScheduleAssignment(employee.id, "2026-10-13", "08:30", "14:30"); // today+13
+  await store.upsertScheduleAssignment(employee.id, "2026-10-14", "08:30", "14:30"); // today+14
+
+  const rows = await listUpcomingRows(store, now);
+
+  assertEquals(rows.map((r) => r.assignment.shiftDate), ["2026-10-13"]);
 });
 
 Deno.test("handleScheduleAddStart starts the date-capture session and prompts for it", async () => {

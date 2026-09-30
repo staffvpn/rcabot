@@ -18,6 +18,7 @@ export async function runCronTick(
   const assignments = await store.listScheduleAssignmentsForDate(dateKey);
   const employees = await store.listEmployees();
   const employeeById = new Map(employees.map((e) => [e.id, e]));
+  const assignedEmployeeIds = new Set(assignments.map((a) => a.employeeId));
 
   for (const assignment of assignments) {
     const employee = employeeById.get(assignment.employeeId);
@@ -34,6 +35,24 @@ export async function runCronTick(
     const actions = decideReminders(now, effectiveSchedule, shift);
     for (const action of actions) {
       await applyAction(store, telegram, employee, shift, action, effectiveSchedule);
+    }
+  }
+
+  // Someone can open a shift without being scheduled (covering for a no-show, forced
+  // substitution — the bot never blocks OPEN). They still need the close reminder and the
+  // 14:20 X-report prompt, which is a venue-wide checkpoint, not a per-person one (spec §6).
+  // Lateness never applies here: it only fires for "pending" shifts, and an unscheduled
+  // employee is never checked for lateness by the loop above in the first place.
+  const todaysShifts = await store.listShiftsForDate(dateKey);
+  for (const shift of todaysShifts) {
+    if (shift.status !== "open") continue;
+    if (assignedEmployeeIds.has(shift.employeeId)) continue;
+    const employee = employeeById.get(shift.employeeId);
+    if (!employee || !employee.active) continue;
+
+    const actions = decideReminders(now, scheduleDay, shift);
+    for (const action of actions) {
+      await applyAction(store, telegram, employee, shift, action, scheduleDay);
     }
   }
 }
