@@ -1,6 +1,6 @@
 import type {
   Admin, ChecklistItem, ChecklistPhase, ChecklistProgress, Employee,
-  ExpiryItem, InstructionArticle, ScheduleDay, Shift, Store,
+  ExpiryItem, InstructionArticle, ScheduleAssignment, ScheduleDay, Shift, Store,
 } from "./store.ts";
 
 function makeId(): string {
@@ -12,6 +12,12 @@ function toEmployee(row: Record<string, unknown>): Employee {
 }
 function toAdmin(row: Record<string, unknown>): Admin {
   return { id: row.id as string, telegramId: Number(row.telegram_id), fullName: row.full_name as string };
+}
+function toScheduleAssignment(row: Record<string, unknown>): ScheduleAssignment {
+  return {
+    id: row.id as string, employeeId: row.employee_id as string, shiftDate: row.shift_date as string,
+    startTime: row.start_time as string, endTime: row.end_time as string,
+  };
 }
 function toChecklistItem(row: Record<string, unknown>): ChecklistItem {
   return {
@@ -115,6 +121,34 @@ export function createD1Store(db: D1Database): Store {
     async getSchedule() {
       const rows = await all("select * from schedule order by weekday");
       return rows.map((r): ScheduleDay => ({ weekday: r.weekday as number, opensAt: r.opens_at as string, closesAt: r.closes_at as string }));
+    },
+    async listScheduleAssignmentsForDate(shiftDate) {
+      return (await all("select * from schedule_assignments where shift_date = ?", shiftDate)).map(toScheduleAssignment);
+    },
+    async listScheduleAssignmentsBetween(fromDateInclusive, toDateExclusive) {
+      return (await all(
+        "select * from schedule_assignments where shift_date >= ? and shift_date < ? order by shift_date",
+        fromDateInclusive, toDateExclusive,
+      )).map(toScheduleAssignment);
+    },
+    async upsertScheduleAssignment(employeeId, shiftDate, startTime, endTime) {
+      const existing = await first(
+        "select id from schedule_assignments where employee_id = ? and shift_date = ?",
+        employeeId, shiftDate,
+      );
+      if (existing) {
+        await run("update schedule_assignments set start_time = ?, end_time = ? where id = ?", startTime, endTime, existing.id);
+        return { id: existing.id as string, employeeId, shiftDate, startTime, endTime };
+      }
+      const id = makeId();
+      await run(
+        "insert into schedule_assignments (id, employee_id, shift_date, start_time, end_time) values (?, ?, ?, ?, ?)",
+        id, employeeId, shiftDate, startTime, endTime,
+      );
+      return { id, employeeId, shiftDate, startTime, endTime };
+    },
+    async removeScheduleAssignment(id) {
+      await run("delete from schedule_assignments where id = ?", id);
     },
 
     async listChecklistItems(phase) {

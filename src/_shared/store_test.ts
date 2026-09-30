@@ -61,6 +61,59 @@ Deno.test("addInstruction defaults to a top-level article, and an explicit paren
   assertEquals(child.parentId, parent.id);
 });
 
+Deno.test("upsertScheduleAssignment creates, then replaces (not duplicates) the same employee+date", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Анна");
+
+  const first = await store.upsertScheduleAssignment(employee.id, "2026-09-30", "08:30", "14:30");
+  assertEquals(first.startTime, "08:30");
+
+  const second = await store.upsertScheduleAssignment(employee.id, "2026-09-30", "09:00", "15:00");
+  assertEquals(second.id, first.id);
+  assertEquals(second.startTime, "09:00");
+  assertEquals(second.endTime, "15:00");
+
+  const forDate = await store.listScheduleAssignmentsForDate("2026-09-30");
+  assertEquals(forDate.length, 1);
+});
+
+Deno.test("listScheduleAssignmentsForDate only returns rows for that exact date", async () => {
+  const store = createInMemoryStore();
+  const anna = await store.addEmployee(1, "Анна");
+  const ivan = await store.addEmployee(2, "Иван");
+  await store.upsertScheduleAssignment(anna.id, "2026-09-30", "08:30", "14:30");
+  await store.upsertScheduleAssignment(ivan.id, "2026-10-01", "08:30", "19:30");
+
+  const rows = await store.listScheduleAssignmentsForDate("2026-09-30");
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].employeeId, anna.id);
+});
+
+Deno.test("listScheduleAssignmentsBetween is [from, to) — includes the start date, excludes the end date, sorted by date", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Анна");
+  await store.upsertScheduleAssignment(employee.id, "2026-09-29", "08:30", "14:30"); // before window
+  await store.upsertScheduleAssignment(employee.id, "2026-09-30", "08:30", "14:30"); // window start (included)
+  await store.upsertScheduleAssignment(employee.id, "2026-10-05", "08:30", "14:30"); // window end minus 1 (included)
+  await store.upsertScheduleAssignment(employee.id, "2026-10-06", "08:30", "14:30"); // window end (excluded)
+
+  const rows = await store.listScheduleAssignmentsBetween("2026-09-30", "2026-10-06");
+
+  assertEquals(rows.map((r) => r.shiftDate), ["2026-09-30", "2026-10-05"]);
+});
+
+Deno.test("removeScheduleAssignment deletes the row; other assignments are untouched", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Анна");
+  const keep = await store.upsertScheduleAssignment(employee.id, "2026-09-30", "08:30", "14:30");
+  const gone = await store.upsertScheduleAssignment(employee.id, "2026-10-01", "08:30", "14:30");
+
+  await store.removeScheduleAssignment(gone.id);
+
+  const rows = await store.listScheduleAssignmentsBetween("2026-09-01", "2026-11-01");
+  assertEquals(rows.map((r) => r.id), [keep.id]);
+});
+
 Deno.test("removeAdmin refuses to delete the last remaining admin", async () => {
   const store = createInMemoryStore();
   const admin = await store.addAdmin(1, "RCA");

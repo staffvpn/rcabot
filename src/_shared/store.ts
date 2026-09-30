@@ -11,6 +11,14 @@ export interface Admin {
   fullName: string;
 }
 
+export interface ScheduleAssignment {
+  id: string;
+  employeeId: string;
+  shiftDate: string; // "2026-09-30"
+  startTime: string; // "08:30"
+  endTime: string; // "14:30"
+}
+
 export interface ScheduleDay {
   weekday: number; // 0 = Monday .. 6 = Sunday
   opensAt: string; // "08:30"
@@ -88,6 +96,13 @@ export interface Store {
   removeAdmin(id: string): Promise<void>;
 
   getSchedule(): Promise<ScheduleDay[]>;
+  /** Who's actually scheduled to work — drives cron reminder/lateness targeting, not a hard gate on OPEN/CLOSER. */
+  listScheduleAssignmentsForDate(shiftDate: string): Promise<ScheduleAssignment[]>;
+  /** [fromDateInclusive, toDateExclusive), sorted by shiftDate ascending. */
+  listScheduleAssignmentsBetween(fromDateInclusive: string, toDateExclusive: string): Promise<ScheduleAssignment[]>;
+  /** One row per (employeeId, shiftDate) — a second call for the same pair replaces the first, never duplicates. */
+  upsertScheduleAssignment(employeeId: string, shiftDate: string, startTime: string, endTime: string): Promise<ScheduleAssignment>;
+  removeScheduleAssignment(id: string): Promise<void>;
 
   listChecklistItems(phase: ChecklistPhase): Promise<ChecklistItem[]>;
   addChecklistItem(phase: ChecklistPhase, label: string, requiresPhoto: boolean): Promise<ChecklistItem>;
@@ -146,6 +161,7 @@ export function createInMemoryStore(): Store {
   const progress = new Map<string, ChecklistProgress>(); // key: `${shiftId}:${checklistItemId}`
   const sessions = new Map<number, SessionState>();
   const ephemeralMessages = new Map<number, { chatId: number; messageId: number }>();
+  const scheduleAssignments = new Map<string, ScheduleAssignment>();
 
   const schedule: ScheduleDay[] = [
     { weekday: 0, opensAt: "08:30", closesAt: "19:30" },
@@ -213,6 +229,29 @@ export function createInMemoryStore(): Store {
 
     async getSchedule() {
       return schedule;
+    },
+    async listScheduleAssignmentsForDate(shiftDate) {
+      return [...scheduleAssignments.values()].filter((a) => a.shiftDate === shiftDate);
+    },
+    async listScheduleAssignmentsBetween(fromDateInclusive, toDateExclusive) {
+      return [...scheduleAssignments.values()]
+        .filter((a) => a.shiftDate >= fromDateInclusive && a.shiftDate < toDateExclusive)
+        .sort((a, b) => (a.shiftDate < b.shiftDate ? -1 : a.shiftDate > b.shiftDate ? 1 : 0));
+    },
+    async upsertScheduleAssignment(employeeId, shiftDate, startTime, endTime) {
+      for (const a of scheduleAssignments.values()) {
+        if (a.employeeId === employeeId && a.shiftDate === shiftDate) {
+          const updated = { ...a, startTime, endTime };
+          scheduleAssignments.set(a.id, updated);
+          return updated;
+        }
+      }
+      const assignment: ScheduleAssignment = { id: makeId(), employeeId, shiftDate, startTime, endTime };
+      scheduleAssignments.set(assignment.id, assignment);
+      return assignment;
+    },
+    async removeScheduleAssignment(id) {
+      scheduleAssignments.delete(id);
     },
 
     async listChecklistItems(phase) {
