@@ -155,8 +155,23 @@ Deno.test("a mismatched cash amount warns the employee and notifies every admin"
   assertEquals(toAdmin.some((m) => m.text.includes("Расхождение размена")), true);
 });
 
-Deno.test("the first-ever shift for an employee opens cleanly with no previous shift to compare against", async () => {
+Deno.test("the first-ever shift for an employee opens against the default 10000 ₽ float when there's no previous shift to compare against", async () => {
   const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Анна");
+  const shift = await store.createShift(employee.id, todayDateKey());
+  const { client, sent } = fakeTelegram();
+
+  await handleOpenCashAmount(store, client, openMessage(1, "10000"), shift.id);
+
+  const updated = await store.getShiftById(shift.id);
+  assertEquals(updated?.status, "open");
+  assertEquals(updated?.cashDiscrepancy, 0);
+  assertEquals(sent.some((m) => m.text.includes("⚠️")), false);
+});
+
+Deno.test("a first-ever shift that doesn't match the default 10000 ₽ float still warns, same as any other mismatch", async () => {
+  const store = createInMemoryStore();
+  await store.addAdmin(999, "RCA");
   const employee = await store.addEmployee(1, "Анна");
   const shift = await store.createShift(employee.id, todayDateKey());
   const { client, sent } = fakeTelegram();
@@ -164,9 +179,10 @@ Deno.test("the first-ever shift for an employee opens cleanly with no previous s
   await handleOpenCashAmount(store, client, openMessage(1, "3000"), shift.id);
 
   const updated = await store.getShiftById(shift.id);
-  assertEquals(updated?.status, "open");
-  assertEquals(updated?.cashDiscrepancy, null);
-  assertEquals(sent.some((m) => m.text.includes("⚠️")), false);
+  assertEquals(updated?.cashDiscrepancy, -7000);
+  const toEmployee = sent.find((m) => m.chatId === 1 && m.text.includes("⚠️"));
+  assertEquals(toEmployee?.text.includes("Стандартный размен"), true);
+  assertEquals(toEmployee?.text.includes("Вчера смена закрылась"), false);
 });
 
 Deno.test("an empty pending shift row (created ahead of time by the cron for a day nobody worked) does not mask the real previous close", async () => {

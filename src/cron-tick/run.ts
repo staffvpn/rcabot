@@ -17,6 +17,14 @@ export async function runCronTick(
 
   const employees = (await store.listEmployees()).filter((e) => e.active);
 
+  // Single venue, one shared cash drawer: once any employee has opened (or closed) today's
+  // shift, every other employee's still-pending row is moot — they're not the one working
+  // today. Without this, registering a brand-new employee any time after opening hours
+  // immediately fires a lateness notice for them, even though the real shift has been open
+  // for hours (this actually happened in production).
+  const todaysShifts = await store.listShiftsForDate(dateKey);
+  const shiftAlreadyHandledToday = todaysShifts.some((s) => s.status !== "pending");
+
   // Single venue, one shared cash drawer: if nobody has opened by opening time, that's one
   // lateness event, not one per registered employee. Every late employee's shift still gets
   // notifiedLateAt so it never re-fires, but only the first one this tick actually pages admins.
@@ -26,6 +34,7 @@ export async function runCronTick(
     let shift = await store.getShift(employee.id, dateKey);
     if (!shift) shift = await store.createShift(employee.id, dateKey);
     if (shift.status === "closed") continue;
+    if (shift.status === "pending" && shiftAlreadyHandledToday) continue;
 
     const actions = decideReminders(now, scheduleDay, shift);
     for (const action of actions) {

@@ -30,6 +30,26 @@ Deno.test("an employee 9 minutes from opening gets the reminder exactly once acr
   assertEquals(reminders.length, 1);
 });
 
+Deno.test("registering a new employee after someone already opened today's shift does not trigger a fresh lateness notice for them", async () => {
+  const store = createInMemoryStore();
+  await store.addAdmin(999, "RCA");
+  const anna = await store.addEmployee(1, "Анна");
+  const { client } = fakeTelegram();
+
+  await runCronTick(store, client, atVenueTime("08:23"));
+  await store.updateShift((await store.getShift(anna.id, "2026-09-21"))!.id, {
+    status: "open",
+    openedAt: atVenueTime("08:23").toISOString(),
+  });
+
+  // A new employee gets added mid-afternoon, long after Анна already opened the real shift.
+  await store.addEmployee(2, "Иван");
+  const { client: client2, sent } = fakeTelegram();
+  await runCronTick(store, client2, atVenueTime("16:16"));
+
+  assertEquals(sent.filter((m) => m.chatId === 999 && m.text.includes("Опоздание")).length, 0);
+});
+
 Deno.test("the lateness notice names no specific employee — with a shared cash drawer, we don't know who was actually due in", async () => {
   const store = createInMemoryStore();
   await store.addAdmin(999, "RCA");

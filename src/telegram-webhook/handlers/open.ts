@@ -5,6 +5,10 @@ import { notifyAdmins } from "../../_shared/notify.ts";
 import { isChecklistComplete, renderChecklistKeyboard } from "../checklist.ts";
 import { renderEmployeeKeyboard } from "../keyboards.ts";
 
+// The venue's standing размен when there's no previous closed shift to compare against yet
+// (first shift ever, or the previous close's float somehow wasn't recorded).
+const DEFAULT_OPENING_FLOAT = 10000;
+
 export async function handleOpenButton(
   store: Store,
   telegram: TelegramClient,
@@ -100,8 +104,8 @@ export async function handleOpenCashAmount(
   if (!shift) return;
 
   const previous = await store.getPreviousClosedShift(shift.shiftDate);
-  const expected = previous?.closingFloatAmount ?? null;
-  const discrepancy = expected === null ? null : Math.round((amount - expected) * 100) / 100;
+  const expected = previous?.closingFloatAmount ?? DEFAULT_OPENING_FLOAT;
+  const discrepancy = Math.round((amount - expected) * 100) / 100;
 
   const updated = await store.updateShift(shift.id, {
     openCashAmount: amount,
@@ -112,10 +116,11 @@ export async function handleOpenCashAmount(
 
   await store.clearSession(message.from.id);
 
-  if (discrepancy !== null && discrepancy !== 0) {
+  if (discrepancy !== 0) {
+    const baseline = previous ? `Вчера смена закрылась с ${expected} ₽` : `Стандартный размен — ${expected} ₽`;
     await telegram.sendMessage(
       message.chat.id,
-      `⚠️ Вчера смена закрылась с ${expected} ₽. Расхождение ${Math.abs(discrepancy)} ₽. Админ уведомлён.`,
+      `⚠️ ${baseline}. Расхождение ${Math.abs(discrepancy)} ₽. Админ уведомлён.`,
     );
     await notifyAdmins(
       store,
