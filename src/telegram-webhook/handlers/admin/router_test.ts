@@ -62,6 +62,56 @@ Deno.test("admin:list:expiry:done clears the session", async () => {
   assertEquals((await store.getSession(1)).state, null);
 });
 
+Deno.test("admin:menu:schedule opens the schedule editor", async () => {
+  const store = createInMemoryStore();
+  const { client, sent, answered } = fakeTelegram();
+
+  await routeAdminCallback(store, client, cbq("admin:menu:schedule"));
+
+  assertEquals(sent[0].text, "Ближайший график:");
+  assertEquals(answered.length, 1);
+});
+
+Deno.test("admin:schedule:add starts the date-capture session", async () => {
+  const store = createInMemoryStore();
+  const { client } = fakeTelegram();
+
+  await routeAdminCallback(store, client, cbq("admin:schedule:add"));
+
+  assertEquals((await store.getSession(1)).state, "admin_schedule_date");
+});
+
+Deno.test("admin:schedule:pick:<index> with no employees answers harmlessly instead of crashing", async () => {
+  const store = createInMemoryStore();
+  await store.setSession(1, "admin_schedule_employee", { date: "2026-09-30" });
+  const { client, answered } = fakeTelegram();
+
+  await routeAdminCallback(store, client, cbq("admin:schedule:pick:0"));
+
+  assertEquals(answered, [{ id: "cbq", text: undefined }]);
+});
+
+Deno.test("admin:schedule:del:<index> deletes the row at that position", async () => {
+  const store = createInMemoryStore();
+  const employee = await store.addEmployee(1, "Анна");
+  await store.upsertScheduleAssignment(employee.id, "2026-09-30", "08:30", "14:30");
+  const { client } = fakeTelegram();
+
+  await routeAdminCallback(store, client, cbq("admin:schedule:del:0"));
+
+  assertEquals((await store.listScheduleAssignmentsForDate("2026-09-30")).length, 0);
+});
+
+Deno.test("admin:schedule:done clears the session", async () => {
+  const store = createInMemoryStore();
+  await store.setSession(1, "admin_schedule_date", {});
+  const { client } = fakeTelegram();
+
+  await routeAdminCallback(store, client, cbq("admin:schedule:done"));
+
+  assertEquals((await store.getSession(1)).state, null);
+});
+
 Deno.test("an unrecognized admin: callback is answered harmlessly instead of crashing", async () => {
   const store = createInMemoryStore();
   const { client, answered } = fakeTelegram();

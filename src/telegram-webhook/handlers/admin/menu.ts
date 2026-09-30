@@ -4,12 +4,14 @@ import { openListEditor } from "./listEditor.ts";
 import { LIST_EDITOR_CONFIGS } from "./listEditorConfigs.ts";
 import { openInstructionsEditor } from "./instructions.ts";
 import { openPeopleEditor, PEOPLE_EDITOR_CONFIGS } from "./peopleEditor.ts";
+import { openScheduleEditor } from "./schedule.ts";
 
 export function renderAdminMenuKeyboard(): InlineKeyboard {
   return {
     inline_keyboard: [
       [{ text: "✏️ Чек-лист открытия", callback_data: "admin:menu:checklist_open" }],
       [{ text: "✅ Чек-лист закрытия", callback_data: "admin:menu:checklist_close" }],
+      [{ text: "📅 График", callback_data: "admin:menu:schedule" }],
       [{ text: "📖 Инструкции", callback_data: "admin:menu:instructions" }],
       [{ text: "🧑‍🍳 Сотрудники", callback_data: "admin:menu:employees" }],
       [{ text: "🍰 Сроки годности", callback_data: "admin:menu:expiry" }],
@@ -26,6 +28,11 @@ export async function handleAdminMenuSelect(
 ): Promise<void> {
   if (key === "instructions") {
     await openInstructionsEditor(store, telegram, callbackQuery.message.chat.id, callbackQuery.from.id);
+    await telegram.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  if (key === "schedule") {
+    await openScheduleEditor(store, telegram, callbackQuery.message.chat.id, callbackQuery.from.id);
     await telegram.answerCallbackQuery(callbackQuery.id);
     return;
   }

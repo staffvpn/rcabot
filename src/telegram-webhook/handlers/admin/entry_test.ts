@@ -28,7 +28,7 @@ Deno.test("/admin from a non-admin gets the same reply as an unrecognized comman
   assertEquals(sent, [{ chatId: 1, text: UNKNOWN_COMMAND_TEXT, replyMarkup: undefined }]);
 });
 
-Deno.test("/admin from a registered admin shows the six-section menu", async () => {
+Deno.test("/admin from a registered admin shows the seven-section menu", async () => {
   const store = createInMemoryStore();
   await store.addAdmin(1, "RCA");
   const { client, sent } = fakeTelegram();
@@ -36,5 +36,5 @@ Deno.test("/admin from a registered admin shows the six-section menu", async () 
   await handleAdminEntry(store, client, msg(1));
 
   assertEquals(sent[0].text, "Панель администратора:");
-  assertEquals((sent[0].replyMarkup as { inline_keyboard: unknown[] }).inline_keyboard.length, 6);
+  assertEquals((sent[0].replyMarkup as { inline_keyboard: unknown[] }).inline_keyboard.length, 7);
 });

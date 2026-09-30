@@ -12,6 +12,7 @@ import { handleListEditorAddText } from "./handlers/admin/listEditor.ts";
 import { LIST_EDITOR_CONFIGS } from "./handlers/admin/listEditorConfigs.ts";
 import { handleInstructionBody, handleInstructionTitle } from "./handlers/admin/instructions.ts";
 import { handlePeopleForward, PEOPLE_EDITOR_CONFIGS } from "./handlers/admin/peopleEditor.ts";
+import { handleScheduleDateText, handleScheduleTimeText } from "./handlers/admin/schedule.ts";
 
 export async function handleMessage(
   store: Store,
@@ -75,6 +76,18 @@ export async function handleMessage(
     const admin = await store.getAdminByTelegramId(message.from.id);
     const config = admin ? PEOPLE_EDITOR_CONFIGS[session.data.key as string] : undefined;
     if (config) await handlePeopleForward(store, telegram, message, config);
+    return;
+  }
+  if (session.state === "admin_schedule_date") {
+    if (await store.getAdminByTelegramId(message.from.id)) {
+      await handleScheduleDateText(store, telegram, message);
+    }
+    return;
+  }
+  if (session.state === "admin_schedule_time") {
+    if (await store.getAdminByTelegramId(message.from.id)) {
+      await handleScheduleTimeText(store, telegram, message);
+    }
     return;
   }
 
